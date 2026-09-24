@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { SettingsStore, validateSettings } = require('./settings.cjs');
 const { ChatService } = require('./chat-service.cjs');
+const { readClipboardImages } = require('./clipboard.cjs');
 
 app.setName('miniGPT');
 // The text-first window also runs on Windows systems without a working GPU driver.
@@ -173,13 +174,13 @@ const actions = {
   },
   'chat:stop': ({ conversationId }) => chat.stop(conversationId),
   'attachments:pick': pickAttachments,
-  'attachments:clipboard': () => { const image = clipboard.readImage(); return image.isEmpty() ? [] : [addAttachment({ type: 'image', name: '粘贴的图片.png', dataUrl: image.toDataURL() })]; },
+  'attachments:clipboard': async () => (await readClipboardImages({ clipboard, nativeImage })).map(addAttachment),
   'settings:update': updateSettings,
   'window:hide': () => win.hide(),
   'window:expand': ({ expanded }) => { const [width] = win.getSize(); win.setSize(width, expanded ? 680 : 260); showWindow(); },
   'window:pin': ({ pinned }) => updateSettings({ alwaysOnTop: pinned }),
   'app:quit': () => { quitting = true; app.quit(); },
-  'clipboard:write': ({ text }) => { if (typeof text !== 'string' || text.length > 2000000) throw new Error('复制内容无效'); clipboard.writeText(text); },
+  'clipboard:write': async ({ text }) => { if (typeof text !== 'string' || text.length > 2000000) throw new Error('复制内容无效'); await clipboard.writeText(text); },
   'link:open': ({ url }) => safeExternal(url)
 };
 
