@@ -7,7 +7,7 @@
     conversation: null, attachments: [], streaming: false, sending: false,
     connecting: false, panel: null, expanded: true, composing: false,
     model: '', effort: '', autoScroll: true, toastTimer: null, generation: 0, pendingGeneration: null,
-    detachedConversations: new Set(),
+    detachedConversations: new Set(), stopRequested: false,
   };
   const api = window.mini;
   const effortNames = { none: '不思考', minimal: '极低', low: '低', medium: '中等', high: '高', xhigh: '超高', max: '最高', ultra: '极致' };
@@ -55,13 +55,14 @@
     prompt.style.height = 'auto';
     prompt.style.height = `${Math.min(prompt.scrollHeight, state.expanded ? 130 : 66)}px`;
   }
+  function isGenerating() { return state.streaming || (state.sending && state.pendingGeneration === state.generation); }
   function updateSend() {
-    const stop = state.streaming;
-    $('send-message').disabled = stop ? false : (state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
-    $('send-message').title = stop ? '停止生成' : !isConnected() ? needsReconnect() ? '重新连接后发送' : '登录 ChatGPT 账号后发送' : '发送 · Enter';
+    const stop = isGenerating();
+    $('send-message').disabled = stop ? state.stopRequested : (state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
+    $('send-message').title = stop ? state.stopRequested ? '正在停止…' : '停止生成' : !isConnected() ? needsReconnect() ? '重新连接后发送' : '登录 ChatGPT 账号后发送' : '发送 · Enter';
     $('send-message').setAttribute('aria-label', stop ? '停止生成' : '发送消息');
-    $('send-message').querySelector('.icon').hidden = stop;
-    $('send-message').querySelector('.stop-square').hidden = !stop;
+    // Switch the SVG reference itself; SVG elements do not reflect .hidden.
+    $('send-message').querySelector('use').setAttribute('href', stop ? '#i-pause' : '#i-arrow');
     $('model-select').disabled = !isConnected() || state.streaming || state.sending;
     $('effort-select').disabled = !isConnected() || state.streaming || state.sending || !(currentModel()?.supportedReasoningEfforts?.length);
     $('login-button').disabled = state.connecting || state.streaming || state.sending;
@@ -316,6 +317,7 @@
     state.generation += 1;
     state.conversation = null;
     state.streaming = false;
+    state.stopRequested = false;
     state.sending = state.pendingGeneration !== null;
     state.attachments = [];
     state.autoScroll = true;
@@ -386,9 +388,24 @@
     files.forEach((file) => { if (!state.attachments.some((item) => item.id === file.id)) state.attachments.push(file); });
     renderAttachments(); $('prompt').focus();
   }
+  async function stopConversation(conversationId) {
+    const generation = state.generation;
+    try { await invoke('chat:stop', { conversationId }); }
+    catch (error) {
+      if (generation === state.generation) { state.stopRequested = false; updateSend(); }
+      throw error;
+    }
+  }
   async function sendMessage() {
-    if (state.streaming) {
-      await invoke('chat:stop', { conversationId: state.conversation?.id });
+    if (isGenerating()) {
+      if (state.stopRequested) return;
+      state.stopRequested = true;
+      updateSend();
+      // During submission there may not be a conversation ID yet. The pending
+      // send and conversation event below both honor this cancellation intent.
+      if (state.streaming && state.conversation?.id) {
+        await stopConversation(state.conversation.id);
+      }
       return;
     }
     const text = $('prompt').value.trim();
@@ -399,10 +416,11 @@
     const conversationBefore = state.conversation?.id;
     const generation = state.generation;
     state.pendingGeneration = generation;
+    state.stopRequested = false;
     state.sending = true; updateSend(); state.autoScroll = true;
     try {
       if (!state.expanded || !state.conversation) await setExpanded(true);
-      if (generation !== state.generation) return;
+      if (generation !== state.generation || state.stopRequested) return;
       const result = await invoke('chat:send', {
         conversationId: conversationBefore || undefined, text, model: state.model,
         effort: state.effort || undefined,
@@ -421,7 +439,11 @@
     } catch (error) {
       if (generation === state.generation) showError(error);
     } finally {
-      if (state.pendingGeneration === generation) { state.pendingGeneration = null; state.sending = false; updateSend(); }
+      if (state.pendingGeneration === generation) {
+        state.pendingGeneration = null; state.sending = false;
+        if (!state.streaming) state.stopRequested = false;
+        updateSend();
+      }
       if (generation === state.generation) $('prompt').focus();
     }
   }
@@ -444,6 +466,7 @@
         if (!state.conversation || state.conversation.id === conversation.id || state.sending) {
           state.streaming = ['generating', 'streaming', 'running'].includes(conversation.status) || state.sending;
           setConversation(conversation);
+          if (state.stopRequested && state.streaming) safely(() => stopConversation(conversation.id));
         }
       } else if (event.type === 'delta') {
         if (!state.conversation || state.conversation.id !== event.conversationId) return;
@@ -458,11 +481,12 @@
         if (state.detachedConversations.has(event.conversation?.id)) return;
         if (!event.conversation || state.conversation?.id === event.conversation.id || !state.conversation) {
           state.streaming = false;
+          state.stopRequested = false;
           if (event.conversation) setConversation(event.conversation); else renderConversation();
         }
       } else if (event.type === 'error') {
         if (state.detachedConversations.has(event.conversationId)) return;
-        if (!event.conversationId || state.conversation?.id === event.conversationId) { state.streaming = false; state.sending = state.pendingGeneration !== null; renderConversation(); showError(event.message); }
+        if (!event.conversationId || state.conversation?.id === event.conversationId) { state.streaming = false; state.stopRequested = false; state.sending = state.pendingGeneration !== null; renderConversation(); showError(event.message); }
       }
     } catch (error) { showError(error); }
   }
@@ -491,7 +515,7 @@
   $('prompt').addEventListener('compositionend', () => { state.composing = false; updateSend(); });
   $('prompt').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !state.composing && event.keyCode !== 229) {
-      event.preventDefault(); if (!state.streaming) safely(sendMessage);
+      event.preventDefault(); if (!isGenerating()) safely(sendMessage);
     }
   });
   $('prompt').addEventListener('paste', (event) => {

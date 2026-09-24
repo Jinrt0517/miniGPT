@@ -10,6 +10,7 @@
     "test:desktop": "node scripts/smoke-desktop.cjs",
     "test:clipboard": "node scripts/check-clipboard.cjs",
     "test:chat": "node scripts/check-chat.cjs",
+    "test:generation-controls": "node scripts/check-generation-controls.cjs",
     "build:assets": "node scripts/build-assets.cjs",
     "pack": "node scripts/package.cjs"
   },
