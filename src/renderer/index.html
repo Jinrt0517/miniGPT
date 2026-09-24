@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>miniGPT</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="vendor/marked.umd.js" defer></script>
+    <script src="vendor/purify.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 1.8c.9 6.3 3.9 9.3 10.2 10.2-6.3.9-9.3 3.9-10.2 10.2C11.1 15.9 8.1 12.9 1.8 12 8.1 11.1 11.1 8.1 12 1.8Z" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 7v5h5M4.5 11a8 8 0 1 1 1.8 6.2M12 8v4l2.8 1.8"/></symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24"><path d="m15 3 6 6-3 1-3 5-1 1-6-6 1-1 5-3 1-3ZM5 19l6-6"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M10 3h4l.7 2.6 2.2 1.3 2.6-.7 2 3.5-1.9 1.9v2.5l1.9 1.9-2 3.5-2.6-.7-2.2 1.3L14 23h-4l-.7-2.9-2.2-1.3-2.6.7-2-3.5 1.9-1.9v-2.5L2.5 9.7l2-3.5 2.6.7 2.2-1.3L10 3Z" transform="translate(0 -1) scale(1 .95)"/><circle cx="12" cy="11.7" r="3"/></symbol>
+      <symbol id="i-hide" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+      <symbol id="i-attach" viewBox="0 0 24 24"><path d="m8 13 6.8-6.8a3 3 0 0 1 4.2 4.2l-9 9a5 5 0 0 1-7-7l9-9a7 7 0 0 1 10 10l-7 7" transform="translate(2 0) scale(.83)"/></symbol>
+      <symbol id="i-screen" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1v4m13-5h4a1 1 0 0 1 1 1v4M3 16v4a1 1 0 0 0 1 1h4m8 0h4a1 1 0 0 0 1-1v-4M8 8h8v8H8z"/></symbol>
+      <symbol id="i-paste" viewBox="0 0 24 24"><path d="M8 5H5v16h14V5h-3M9 3h6v4H9zM8 12h8M8 16h6"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 3H4a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-6"/></symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24"><path d="m5 9 7-6 7 6M5 15l7 6 7-6"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H5v20h14V7l-5-5Zm0 0v5h5M8 12h8m-8 4h6"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m3 16 5-4 4 4 4-6 5 6"/></symbol>
+      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 10-13h-7l1-7Z"/></symbol>
+      <symbol id="i-write" viewBox="0 0 24 24"><path d="m14 4 6 6M4 20l5-1L21 7a2 2 0 0 0-4-4L5 15l-1 5ZM12 20h9"/></symbol>
+    </svg>
+
+    <main id="app" class="app" data-view="welcome">
+      <header class="titlebar">
+        <div class="brand"><span class="brand-mark"><svg class="icon"><use href="#i-spark"/></svg></span><span>mini<span class="brand-light">GPT</span></span></div>
+        <nav class="window-actions" aria-label="窗口操作">
+          <button id="new-chat" class="icon-button" title="新对话 · Ctrl+N" aria-label="新对话"><svg class="icon"><use href="#i-plus"/></svg></button>
+          <button id="history-toggle" class="icon-button" title="历史对话" aria-label="历史对话" aria-expanded="false"><svg class="icon"><use href="#i-history"/></svg></button>
+          <button id="pin-toggle" class="icon-button" title="置顶窗口" aria-label="置顶窗口" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button>
+          <span class="action-divider"></span>
+          <button id="settings-toggle" class="icon-button" title="设置" aria-label="设置" aria-expanded="false"><svg class="icon"><use href="#i-settings"/></svg></button>
+          <button id="hide-window" class="icon-button" title="隐藏 · Esc" aria-label="隐藏窗口"><svg class="icon"><use href="#i-hide"/></svg></button>
+        </nav>
+      </header>
+
+      <div id="connection-banner" class="connection-banner" hidden>
+        <span class="status-dot"></span><span id="connection-banner-text">正在连接…</span><button id="connection-banner-action" class="text-button">连接</button>
+      </div>
+
+      <section id="conversation-area" class="conversation-area" aria-label="对话">
+        <div id="welcome" class="welcome">
+          <h1>有什么可以帮你？</h1>
+        </div>
+        <div id="messages" class="messages" aria-live="polite" aria-relevant="additions text"></div>
+        <button id="scroll-bottom" class="scroll-bottom icon-button" title="回到最新消息" aria-label="回到最新消息" hidden><svg class="icon"><use href="#i-arrow"/></svg></button>
+      </section>
+
+      <div id="error-bar" class="error-bar" role="alert" hidden><span id="error-text"></span><button id="error-dismiss" class="icon-button" aria-label="关闭提示"><svg class="icon"><use href="#i-close"/></svg></button></div>
+
+      <section class="composer-region" aria-label="发送消息">
+        <div id="composer" class="composer">
+          <div id="attachments" class="attachments" aria-label="待发送的附件" hidden></div>
+          <textarea id="prompt" placeholder="问点什么，或分享你的想法…" rows="2" aria-label="输入消息" spellcheck="false"></textarea>
+          <div class="composer-toolbar">
+            <div class="attachment-actions">
+              <button id="attach-screen" class="icon-button" title="区域截图提问" aria-label="区域截图提问"><svg class="icon"><use href="#i-screen"/></svg></button>
+              <button id="attach-clipboard" class="icon-button" title="粘贴图片 · Ctrl+V" aria-label="粘贴剪贴板图片"><svg class="icon"><use href="#i-paste"/></svg></button>
+            </div>
+            <div class="model-controls">
+              <label class="select-wrap model-select-wrap"><span class="sr-only">模型</span><select id="model-select" aria-label="模型" disabled><option value="">连接后选择模型</option></select><svg class="icon"><use href="#i-chevron"/></svg></label>
+              <span class="model-divider"></span>
+              <label class="select-wrap effort-select-wrap"><span class="sr-only">思考强度</span><select id="effort-select" aria-label="思考强度" disabled><option value="">思考强度</option></select><svg class="icon"><use href="#i-chevron"/></svg></label>
+            </div>
+            <button id="send-message" class="send-button" title="发送 · Enter" aria-label="发送消息" disabled><svg class="icon"><use href="#i-arrow"/></svg><span class="stop-square" hidden></span></button>
+          </div>
+        </div>
+        <footer class="statusbar">
+          <button id="account-status" class="account-status" title="查看账号与连接"><span id="account-dot" class="status-dot"></span><span id="account-label">正在连接订阅…</span></button>
+          <div class="keyboard-hints"><span><kbd>Enter</kbd> 发送</span><span class="hide-hint"><kbd>Esc</kbd> 隐藏</span><button id="expand-window" class="compact-toggle" title="切换紧凑窗口" aria-label="切换紧凑窗口"><svg class="icon"><use href="#i-expand"/></svg></button></div>
+        </footer>
+      </section>
+
+      <div id="panel-backdrop" class="panel-backdrop" hidden></div>
+      <aside id="history-panel" class="side-panel history-panel" aria-label="历史对话" hidden>
+        <div class="panel-heading"><h2>历史对话</h2><button class="icon-button panel-close" aria-label="关闭历史对话"><svg class="icon"><use href="#i-close"/></svg></button></div>
+        <label class="history-search"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" placeholder="搜索对话" aria-label="搜索对话" /></label>
+        <div id="history-list" class="history-list"></div>
+        <p class="panel-footnote">可在这里继续之前的对话</p>
+      </aside>
+      <aside id="settings-panel" class="side-panel settings-panel" aria-label="设置" hidden>
+        <div class="panel-heading"><h2>设置</h2><button class="icon-button panel-close" aria-label="关闭设置"><svg class="icon"><use href="#i-close"/></svg></button></div>
+        <div class="settings-scroll">
+          <section class="settings-section account-section"><h3>账号与订阅</h3><div class="account-card"><div class="account-avatar"><svg class="icon"><use href="#i-spark"/></svg></div><div><strong id="settings-account-name">尚未连接</strong><span id="settings-account-detail">使用你的 ChatGPT 账号登录</span></div></div><div class="account-buttons"><button id="login-button" class="primary-button">登录 ChatGPT</button><button id="reconnect-button" class="secondary-button">重新连接</button></div><p class="help-copy">使用 ChatGPT 订阅中的 Codex 权益，无需 API Key。可用模型、思考强度与额度以账号实际返回为准。</p><p class="help-copy subtle">每次从隐藏状态唤起时开启新对话，也可以从历史继续聊天。对话不会同步到 ChatGPT 网页，额度与网页聊天分开计算。</p><p id="rate-limit-copy" class="help-copy" hidden></p></section>
+          <section class="settings-section"><h3>唤起与窗口</h3><label class="setting-row setting-column" for="setting-hotkey"><span><strong>全局快捷键</strong><small>在任何应用里唤起 miniGPT</small></span><div class="hotkey-field"><input id="setting-hotkey" value="Alt+Space" aria-label="全局快捷键" /><button id="save-hotkey" class="secondary-button">保存</button></div></label><p id="hotkey-status" class="help-copy"></p><label class="setting-row"><span><strong>窗口始终置顶</strong><small>让对话留在其他窗口上方</small></span><input id="setting-pin" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>失去焦点时隐藏</strong><small>点击窗口外，收起 miniGPT</small></span><input id="setting-hide-blur" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>跟随鼠标所在屏幕</strong><small>在当前使用的显示器上唤起</small></span><input id="setting-follow-mouse" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>开机启动</strong><small>登录 Windows 后在托盘待命</small></span><input id="setting-autostart" class="switch" type="checkbox" /></label></section>
+          <section class="settings-section"><h3>外观</h3><label class="setting-row" for="setting-theme"><span><strong>主题</strong></span><select id="setting-theme" class="setting-select"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></section>
+          <section class="settings-section"><h3>连接设置</h3><label class="setting-row setting-column" for="setting-codex-path"><span><strong>Codex 程序位置</strong><small>留空时自动寻找本机安装的 Codex</small></span><input id="setting-codex-path" class="text-field" placeholder="自动检测" spellcheck="false" /></label><button id="save-codex-path" class="secondary-button">保存并重新连接</button></section>
+          <div class="settings-bottom"><span>miniGPT <span class="version-label">0.1</span></span><button id="quit-app" class="text-button">退出应用</button></div>
+        </div>
+      </aside>
+      <div id="toast" class="toast" role="status" hidden></div>
+    </main>
+  </body>
+</html>

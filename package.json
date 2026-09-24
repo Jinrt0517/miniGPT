@@ -1,0 +1,22 @@
+{
+  "name": "minigpt-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A compact Windows conversation companion with a global shortcut.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:desktop": "node scripts/smoke-desktop.cjs",
+    "build:assets": "node scripts/build-assets.cjs",
+    "pack": "node scripts/package.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "playwright": "^1.63.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.6",
+    "marked": "^16.0.0"
+  }
+}

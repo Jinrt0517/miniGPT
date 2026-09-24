@@ -1,0 +1,196 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { ChatService } = require('../src/chat-service.cjs');
+const { SAFE_CONFIG } = require('../src/codex-client.cjs');
+
+const MODEL = { id: 'model-id', model: 'test-model', displayName: 'Test model', description: '', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'normal' }, { reasoningEffort: 'high', description: 'deep' }], inputModalities: ['text', 'image'] };
+class MockClient extends EventEmitter {
+  constructor() { super(); this.calls = []; this.seq = 0; this.accountType = 'chatgpt'; }
+  async connect() { this.ready = true; }
+  async request(method, params) {
+    this.calls.push({ method, params });
+    if (this.override) { const result = await this.override(method, params); if (result !== undefined) return result; }
+    if (method === 'config/read') return { config: { ...SAFE_CONFIG, mcp_servers: { 'existing.server': { command: 'do-not-launch' } } } };
+    if (method === 'account/read') return { account: { type: this.accountType, email: 'test@example.test', planType: 'pro', accessToken: 'never-expose' } };
+    if (method === 'model/list') return { data: [MODEL], nextCursor: null };
+    if (method === 'account/rateLimits/read') return { rateLimits: null };
+    if (method === 'thread/start') return { thread: { id: `remote-${++this.seq}`, ephemeral: true, environments: [] }, sandbox: { type: 'readOnly', networkAccess: false } };
+    if (method === 'turn/start') return { turn: { id: `turn-${++this.seq}`, status: 'inProgress' } };
+    if (method === 'turn/interrupt') return {};
+    if (method === 'account/login/start') return { type: 'chatgpt', loginId: 'login', authUrl: 'https://auth.openai.com/authorize?test=true' };
+    throw new Error(`Unexpected request ${method}`);
+  }
+  close() { if (this.ready) { this.ready = false; this.emit('disconnect'); } }
+}
+
+function setup(t, options = {}) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minigpt-test-'));
+  const client = new MockClient();
+  const service = new ChatService({ dataDir, clientFactory: () => client, ...options });
+  const events = [];
+  service.on('event', (event) => events.push(event));
+  t.after(() => { service.close(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  return { service, client, dataDir, events };
+}
+
+function finish(client, service, id, content = '你好') {
+  const active = service.active.get(id);
+  client.emit('notification', 'item/agentMessage/delta', { threadId: active.threadId, turnId: active.turnId, itemId: 'answer', delta: content });
+  client.emit('notification', 'turn/completed', { threadId: active.threadId, turn: { id: active.turnId, status: 'completed', items: [{ id: 'answer', type: 'agentMessage', text: content }] } });
+}
+
+test('connect projects only account metadata and dynamically discovers models', async (t) => {
+  const { service, client, events } = setup(t);
+  const result = await service.connect();
+  assert.equal(result.account.type, 'chatgpt');
+  assert.equal(result.models[0].model, MODEL.model);
+  assert.equal(result.account.accessToken, undefined);
+  assert.equal(service.threadConfig['mcp_servers."existing.server".enabled'], false);
+  assert.ok(events.some((e) => e.type === 'connection' && e.connection.status === 'connected'));
+  assert.equal(client.calls.some((c) => c.method === 'thread/list'), false);
+});
+
+test('text chat streams, persists, and resumes only its own ephemeral conversation', async (t) => {
+  const { service, client, dataDir, events } = setup(t);
+  const { conversationId } = await service.send({ text: '你好', effort: 'high' });
+  const start = client.calls.find((c) => c.method === 'thread/start').params;
+  const turn = client.calls.find((c) => c.method === 'turn/start').params;
+  assert.deepEqual(start.environments, []);
+  assert.deepEqual(turn.environments, []);
+  assert.equal(start.ephemeral, true);
+  assert.equal(start.config['features.shell_tool'], false);
+  assert.equal(start.config['features.hooks'], false);
+  assert.equal(turn.effort, 'high');
+  finish(client, service, conversationId);
+  assert.equal(service.getConversation(conversationId).messages[1].content, '你好');
+  assert.ok(events.some((e) => e.type === 'delta' && e.delta === '你好'));
+  assert.ok(events.some((e) => e.type === 'complete'));
+  await service.send({ conversationId, text: '继续' });
+  assert.equal(client.calls.filter((c) => c.method === 'thread/start').length, 1);
+  finish(client, service, conversationId, '继续回答');
+  service.close();
+  const secondClient = new MockClient();
+  const restored = new ChatService({ dataDir, clientFactory: () => secondClient });
+  await restored.send({ conversationId, text: '再继续' });
+  const replay = secondClient.calls.find((c) => c.method === 'turn/start').params.input;
+  assert.match(replay[0].text, /previous_conversation/);
+  assert.match(replay[0].text, /继续回答/);
+  assert.equal(secondClient.calls.some((c) => c.method === 'thread/resume' || c.method === 'thread/read'), false);
+  restored.close();
+  assert.doesNotMatch(fs.readFileSync(path.join(dataDir, 'conversations.json'), 'utf8'), /never-expose|remote-/);
+});
+
+test('unknown conversations, invalid models and efforts, and file paths are rejected', async (t) => {
+  const { service, client } = setup(t);
+  await service.connect();
+  await assert.rejects(service.send({ conversationId: '../other', text: 'test' }), /找不到/);
+  await assert.rejects(service.send({ text: 'test', model: 'invented' }), /模型/);
+  await assert.rejects(service.send({ text: 'test', effort: 'invented' }), /思考强度/);
+  await assert.rejects(service.send({ text: '', attachments: [{ type: 'localImage', name: 'secret', path: '/secret' }] }), /仅支持/);
+  assert.equal(client.calls.some((c) => c.method.startsWith('thread/')), false);
+  assert.throws(() => service.getConversation('someone-elses-thread'), /找不到/);
+  await assert.rejects(service.deleteConversation('someone-elses-thread'), /找不到/);
+});
+
+test('API-key accounts cannot silently switch to separately billed usage', async (t) => {
+  const { service, client } = setup(t);
+  client.accountType = 'apiKey';
+  await assert.rejects(service.send({ text: 'test' }), /ChatGPT/);
+  assert.equal(client.calls.some((c) => c.method === 'turn/start'), false);
+});
+
+test('attachments use explicit content, and returned snapshots cannot mutate state', async (t) => {
+  const { service, client } = setup(t);
+  const { conversationId } = await service.send({ text: '看附件', attachments: [{ type: 'text', name: 'note.txt', text: 'a note' }, { type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,YQ==' }] });
+  const input = client.calls.find((c) => c.method === 'turn/start').params.input;
+  assert.deepEqual(input.map((i) => i.type), ['text', 'text', 'image']);
+  assert.match(input[1].text, /a note/);
+  const snapshot = service.getConversation(conversationId);
+  snapshot.messages[0].content = 'mutated';
+  assert.equal(service.getConversation(conversationId).messages[0].content, '看附件');
+  finish(client, service, conversationId);
+});
+
+test('restarting restores original image and text attachment content for conversation context', async (t) => {
+  const { service, client, dataDir } = setup(t);
+  const dataUrl = 'data:image/png;base64,YWJjZA==';
+  const { conversationId } = await service.send({ text: '记住附件', attachments: [
+    { type: 'image', name: 'capture.png', dataUrl },
+    { type: 'text', name: 'note.txt', text: 'Remember this attachment text.' },
+  ] });
+  finish(client, service, conversationId);
+  service.close();
+  const nextClient = new MockClient();
+  const restored = new ChatService({ dataDir, clientFactory: () => nextClient });
+  await restored.send({ conversationId, text: '图片里是什么？' });
+  const inputs = nextClient.calls.find((c) => c.method === 'turn/start').params.input;
+  assert.ok(inputs.some((input) => input.type === 'image' && input.url === dataUrl));
+  assert.ok(inputs.some((input) => input.type === 'text' && input.text.includes('Remember this attachment text.')));
+  assert.equal(restored.getConversation(conversationId).messages[0].attachments[0].dataUrl, undefined);
+  await restored.stop(conversationId);
+  await restored.deleteConversation(conversationId);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'conversations.json'), 'utf8')).attachments, {});
+  restored.close();
+});
+
+test('optional nonpersistent mode writes no message history', async (t) => {
+  const { service, client, dataDir } = setup(t, { persistHistory: false });
+  const { conversationId } = await service.send({ text: 'private session' });
+  finish(client, service, conversationId);
+  assert.equal(fs.existsSync(path.join(dataDir, 'conversations.json')), false);
+});
+
+test('cancelling during thread creation prevents the turn from ever starting', async (t) => {
+  const { service, client } = setup(t);
+  await service.connect();
+  let resolveThread;
+  client.override = async (method) => method === 'thread/start' ? new Promise((resolve) => { resolveThread = resolve; }) : undefined;
+  const pending = service.send({ text: 'cancel before generation' });
+  const id = service.listConversations()[0].id;
+  await service.stop(id);
+  resolveThread({ thread: { id: 'delayed', ephemeral: true, environments: [] }, sandbox: { type: 'readOnly', networkAccess: false } });
+  await pending;
+  assert.equal(client.calls.some((c) => c.method === 'turn/start'), false);
+  assert.equal(service.getConversation(id).messages.at(-1).status, 'interrupted');
+});
+
+test('cancel interrupts only an owned turn and late notifications cannot corrupt the next turn', async (t) => {
+  const { service, client } = setup(t);
+  const { conversationId } = await service.send({ text: 'test' });
+  const previous = { ...service.active.get(conversationId) };
+  await service.stop(conversationId);
+  assert.equal(client.calls.at(-1).method, 'turn/interrupt');
+  assert.equal(service.getConversation(conversationId).messages.at(-1).status, 'interrupted');
+  await service.send({ conversationId, text: 'again' });
+  client.emit('notification', 'item/agentMessage/delta', { threadId: previous.threadId, turnId: previous.turnId, itemId: 'answer', delta: 'LATE' });
+  assert.equal(service.getConversation(conversationId).messages.at(-1).content, '');
+  finish(client, service, conversationId, 'fresh');
+  await service.deleteConversation(conversationId);
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(client.calls.some((c) => c.method === 'thread/archive' || c.method === 'account/logout'), false);
+});
+
+test('refuses a CLI that does not enforce the safe configuration or no-environment thread', async (t) => {
+  const { service, client } = setup(t);
+  client.override = async (method) => method === 'config/read' ? { config: { ...SAFE_CONFIG, features: { ...SAFE_CONFIG.features, shell_tool: true } } } : undefined;
+  await assert.rejects(service.connect(), /隔离/);
+  client.override = async (method) => method === 'thread/start' ? { thread: { id: 'bad', ephemeral: true, environments: [{ id: 'local' }] }, sandbox: { type: 'readOnly', networkAccess: false } } : undefined;
+  await assert.rejects(service.send({ text: 'test' }), /隔离/);
+  assert.equal(client.calls.some((c) => c.method === 'turn/start'), false);
+});
+
+test('disconnect and idle timeout terminate partial replies and allow reconnection', async (t) => {
+  const { service, client } = setup(t, { turnTimeoutMs: 20 });
+  const { conversationId } = await service.send({ text: 'test' });
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.equal(service.getConversation(conversationId).messages.at(-1).status, 'failed');
+  assert.equal(service.connected, false);
+  await service.send({ conversationId, text: 'retry' });
+  client.close();
+  assert.equal(service.getConversation(conversationId).messages.at(-1).status, 'interrupted');
+});
