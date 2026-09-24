@@ -46,7 +46,8 @@
     return api.invoke(action, payload);
   }
   async function safely(action) { try { return await action(); } catch (error) { showError(error); return undefined; } }
-  function isConnected() { return Boolean(state.connection?.account?.type === 'chatgpt' && state.connection.models?.length && !state.connection.error); }
+  function isConnected() { return Boolean(state.connection.status === 'connected' && !state.connecting && state.connection.account?.type === 'chatgpt' && state.connection.models?.length && !state.connection.error); }
+  function needsReconnect() { return state.connection.status !== 'connected' || state.connection.account?.type === 'chatgpt'; }
   function modelId(model) { return model.model || model.id; }
   function currentModel() { return (state.connection.models || []).find((model) => modelId(model) === state.model); }
   function resizePrompt() {
@@ -57,7 +58,7 @@
   function updateSend() {
     const stop = state.streaming;
     $('send-message').disabled = stop ? false : (state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
-    $('send-message').title = stop ? '停止生成' : !isConnected() ? '连接 ChatGPT 账号后发送' : '发送 · Enter';
+    $('send-message').title = stop ? '停止生成' : !isConnected() ? needsReconnect() ? '重新连接后发送' : '登录 ChatGPT 账号后发送' : '发送 · Enter';
     $('send-message').setAttribute('aria-label', stop ? '停止生成' : '发送消息');
     $('send-message').querySelector('.icon').hidden = stop;
     $('send-message').querySelector('.stop-square').hidden = !stop;
@@ -110,20 +111,21 @@
   }
   function renderConnection() {
     const account = state.connection.account;
+    const knownAccount = account?.type === 'chatgpt';
     const connected = isConnected();
     $('account-dot').classList.toggle('connected', connected);
     $('account-dot').classList.toggle('connecting', state.connecting);
     const plan = account?.planType || account?.plan || '';
     const accountName = account?.email || account?.name || account?.displayName || 'ChatGPT 账号';
-    $('account-label').textContent = connected ? `ChatGPT${plan ? ` ${plan}` : ''} · 已连接` : state.connecting ? '正在连接订阅…' : '连接 ChatGPT 订阅';
-    $('settings-account-name').textContent = connected ? accountName : '尚未连接';
-    $('settings-account-detail').textContent = connected ? `已连接${plan ? ` · ${plan}` : ''} · Codex 权益` : state.connecting ? '正在检查登录状态…' : '使用你的 ChatGPT 账号登录';
-    $('login-button').textContent = connected ? '重新登录' : '登录 ChatGPT';
+    $('account-label').textContent = connected ? `ChatGPT${plan ? ` ${plan}` : ''} · 已连接` : state.connecting ? '正在连接订阅…' : knownAccount ? '连接已断开 · 点击重新连接' : '连接 ChatGPT 订阅';
+    $('settings-account-name').textContent = knownAccount ? accountName : '尚未连接';
+    $('settings-account-detail').textContent = connected ? `已连接${plan ? ` · ${plan}` : ''} · Codex 权益` : state.connecting ? '正在检查登录状态…' : knownAccount ? '连接已断开，请点击“重新连接”' : '使用你的 ChatGPT 账号登录';
+    $('login-button').textContent = knownAccount ? '重新登录' : '登录 ChatGPT';
     $('login-button').disabled = state.connecting;
     $('reconnect-button').disabled = state.connecting;
     $('connection-banner').hidden = connected;
-    $('connection-banner-text').textContent = state.connecting ? '正在连接本机 Codex…' : state.connection.error ? errorMessage(state.connection.error) : account && account.type !== 'chatgpt' ? '当前为 API 登录，请切换到 ChatGPT 账号以使用订阅。' : '登录 ChatGPT，使用订阅中的 Codex 权益';
-    $('connection-banner-action').textContent = state.connecting ? '连接中' : account?.type === 'chatgpt' ? '重试' : '登录';
+    $('connection-banner-text').textContent = state.connecting ? '正在连接本机 Codex…' : state.connection.error ? errorMessage(state.connection.error) : needsReconnect() ? '连接已断开，请重新连接后继续对话。' : account && account.type !== 'chatgpt' ? '当前为 API 登录，请切换到 ChatGPT 账号以使用订阅。' : '登录 ChatGPT，使用订阅中的 Codex 权益';
+    $('connection-banner-action').textContent = state.connecting ? '连接中' : needsReconnect() ? '重新连接' : '登录';
     $('connection-banner-action').disabled = state.connecting;
     const rawLimits = state.connection.rateLimits;
     const limits = rawLimits?.rateLimits || rawLimits;
@@ -136,16 +138,23 @@
     renderModels();
   }
   function setConnection(connection) {
-    state.connection = connection || { account: null, models: [] };
+    const next = connection || { status: 'disconnected' };
+    const status = next.error ? 'disconnected' : next.status || 'disconnected';
+    // Transport failures do not establish that the official account logged out.
+    // Keep its last model selection until a successful account refresh replaces it.
+    state.connection = status === 'connected' ? { ...next, status } : {
+      ...state.connection, ...next, status,
+      account: state.connection.account || next.account || null,
+      models: state.connection.models?.length ? state.connection.models : next.models || [],
+    };
     state.connecting = state.connection.status === 'connecting';
     renderConnection();
   }
   async function connect() {
-    state.connecting = true;
     clearError();
-    renderConnection();
+    setConnection({ status: 'connecting', error: null });
     try { setConnection(await invoke('connect')); }
-    catch (error) { setConnection({ account: null, models: [], error: errorMessage(error) }); showError(error); }
+    catch (error) { setConnection({ status: 'disconnected', error: errorMessage(error) }); showError(error); }
   }
   async function login() {
     $('login-button').disabled = true;
@@ -473,7 +482,7 @@
   $('hide-window').addEventListener('click', () => safely(() => invoke('window:hide')));
   $('expand-window').addEventListener('click', () => safely(() => setExpanded(!state.expanded)));
   $('error-dismiss').addEventListener('click', clearError);
-  $('connection-banner-action').addEventListener('click', () => state.connection.account?.type === 'chatgpt' ? connect() : login());
+  $('connection-banner-action').addEventListener('click', () => needsReconnect() ? connect() : login());
   $('login-button').addEventListener('click', login);
   $('reconnect-button').addEventListener('click', connect);
   $('send-message').addEventListener('click', () => safely(sendMessage));

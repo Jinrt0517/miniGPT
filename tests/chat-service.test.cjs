@@ -50,7 +50,8 @@ test('connect projects only account metadata and dynamically discovers models', 
   assert.equal(result.account.type, 'chatgpt');
   assert.equal(result.models[0].model, MODEL.model);
   assert.equal(result.account.accessToken, undefined);
-  assert.equal(service.threadConfig['mcp_servers."existing.server".enabled'], false);
+  assert.deepEqual(service.threadConfig.mcp_servers['existing.server'], { enabled: false });
+  assert.equal(Object.keys(service.threadConfig).some(key => key.startsWith('mcp_servers.')), false);
   assert.ok(events.some((e) => e.type === 'connection' && e.connection.status === 'connected'));
   assert.equal(client.calls.some((c) => c.method === 'thread/list'), false);
 });
@@ -83,6 +84,29 @@ test('text chat streams, persists, and resumes only its own ephemeral conversati
   assert.equal(secondClient.calls.some((c) => c.method === 'thread/resume' || c.method === 'thread/read'), false);
   restored.close();
   assert.doesNotMatch(fs.readFileSync(path.join(dataDir, 'conversations.json'), 'utf8'), /never-expose|remote-/);
+});
+
+test('thread configuration disables inherited MCP servers without changing literal names or transports', async (t) => {
+  const { service, client } = setup(t);
+  const servers = {
+    node_repl: { command: 'never-launch', args: ['--stdio'], enabled: true, tool_timeout_sec: null },
+    'server.with.dots': { url: 'https://example.invalid/mcp', enabled: true },
+    'server"with"quotes': { command: 'never-launch-either', enabled: false },
+  };
+  client.override = async (method, params) => {
+    if (method === 'config/read') return { config: { ...SAFE_CONFIG, mcp_servers: servers } };
+    if (method === 'thread/start') {
+      assert.equal(Object.keys(params.config).some(key => key.startsWith('mcp_servers.')), false);
+      assert.deepEqual(Object.keys(params.config.mcp_servers), Object.keys(servers));
+      for (const [name, server] of Object.entries(servers)) {
+        assert.deepEqual(params.config.mcp_servers[name], { enabled: false });
+        assert.deepEqual({ ...server, ...params.config.mcp_servers[name] }, { ...server, enabled: false });
+      }
+    }
+  };
+  const { conversationId } = await service.send({ text: 'hello' });
+  finish(client, service, conversationId);
+  assert.equal(servers.node_repl.enabled, true, 'user configuration must not be mutated');
 });
 
 test('unknown conversations, invalid models and efforts, and file paths are rejected', async (t) => {

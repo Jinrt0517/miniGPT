@@ -117,11 +117,14 @@ class ChatService extends EventEmitter {
         if (key === 'features') for (const [feature, enabled] of Object.entries(value)) this.threadConfig[`features.${feature}`] = enabled;
         else this.threadConfig[key] = value;
       }
-      // CLI configuration tables merge recursively: mcp_servers={} alone does
-      // not remove inherited servers. Disable every inherited entry explicitly.
-      for (const name of Object.keys(config.mcp_servers || {})) {
-        this.threadConfig[`mcp_servers.${JSON.stringify(name)}.enabled`] = false;
-      }
+      // App-server JSON overrides do not parse TOML quoting in dotted keys.
+      // A quoted server name creates a new, transport-less entry and prevents
+      // thread/start. Merge only the enabled flag into each original server;
+      // config/read contains null optional values that cannot round-trip through
+      // JSON-to-TOML overrides (e.g. tool_timeout_sec would become a string).
+      this.threadConfig.mcp_servers = Object.fromEntries(
+        Object.keys(config.mcp_servers || {}).map(name => [name, { enabled: false }])
+      );
       await this._refreshAccount();
       this.connected = true;
       const connection = this._connection();

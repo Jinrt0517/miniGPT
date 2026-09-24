@@ -22,7 +22,8 @@ const SAFE_CONFIG = Object.freeze({
 
 function safeError(error, fallback = 'Codex 连接发生错误，请重试。') {
   const source = typeof error === 'string' ? error : error?.message || '';
-  if (/ENOENT|not found|找不到/.test(source)) return '没有找到 Codex CLI。请在设置中指定 codex.exe 路径。';
+  if (/ENOENT/.test(source)) return '没有找到 Codex CLI。请在设置中指定 codex.exe 路径。';
+  if (/failed to load configuration|invalid transport|error loading config/i.test(source)) return 'Codex 配置加载失败，请更新 miniGPT 后重新连接。';
   if (/timeout|timed out|超时/i.test(source)) return 'Codex 请求超时，请检查网络后重试。';
   if (/usage.limit|rate.limit|quota|limit reached/i.test(source)) return '当前账户已达到使用限制，请稍后再试。';
   if (/unauthoriz|authentication|not logged|401/i.test(source)) return '登录已失效，请重新使用 ChatGPT 登录。';
@@ -106,7 +107,7 @@ class CodexClient extends EventEmitter {
         this.pending.delete(id);
         reject(new Error('Codex 请求超时，请检查网络后重试。'));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       this._write({ id, method, params }, (error) => {
         if (!error) return;
         const entry = this.pending.get(id);
@@ -143,7 +144,12 @@ class CodexClient extends EventEmitter {
     if (!entry) return;
     this.pending.delete(message.id);
     clearTimeout(entry.timer);
-    if (message.error) entry.reject(new Error(safeError(message.error, 'Codex 无法完成该请求，请重新连接或检查账户状态。')));
+    if (message.error) {
+      const stages = { 'thread/start': '创建对话', 'turn/start': '发送消息' };
+      const stage = stages[entry.method] || '请求';
+      const code = Number.isSafeInteger(message.error.code) ? `（错误码 ${message.error.code}）` : '';
+      entry.reject(new Error(safeError(message.error, `Codex ${stage}失败${code}，请重新连接后重试。`)));
+    }
     else entry.resolve(message.result);
   }
 

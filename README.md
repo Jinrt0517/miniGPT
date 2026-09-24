@@ -69,6 +69,8 @@ npm run pack
 
 `test:desktop` 在隐藏的测试窗口中读取当前登录的账号和模型，数据写入 `.test-data/integration`。设置 `MINIGPT_LIVE_TEST=1` 后才会执行两条简短的真实订阅聊天测试；默认不发送聊天请求。
 
+完成打包后可运行 `npm run test:chat`，在成品中发送三条真实订阅请求，检查文字回复、历史续聊和粘贴图片识别。测试使用独立的 `.test-data/check-chat` 目录与合成红色图片，不读取或覆盖系统剪贴板；会使用账号的少量 Codex 额度。
+
 图片粘贴回归检查：先复制一张图片，再运行 `npm run test:clipboard`。它在隐藏窗口中只读验证当前系统剪贴板、粘贴按钮和真实粘贴事件，不覆盖剪贴板、不保存图片或发送聊天。剪贴板读取使用当前 Electron 的异步 `ClipboardItem` 接口。
 
 项目内包含协议分包、超时、隔离配置、取消、历史恢复、附件恢复、计费模式和设置校验的自动化测试。UI 渲染使用本地打包的 marked 和 DOMPurify，远程内容没有 Node.js 权限。

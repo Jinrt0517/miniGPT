@@ -73,3 +73,15 @@ test('timeouts, disconnects, and RPC failures never leak raw diagnostics', async
   assert.equal(client.pending.size, 0);
   assert.equal(client.ready, false);
 });
+
+test('configuration and unknown RPC failures identify the failing stage without exposing diagnostics', async () => {
+  const { client, child, messages } = transport();
+  await client.connect();
+  const configuration = client.request('thread/start');
+  child.stdout.write(`${JSON.stringify({ id: messages.at(-1).id, error: { code: -32600, message: 'failed to load configuration: invalid transport in mcp_servers.private_server' } })}\n`);
+  await assert.rejects(configuration, error => /配置加载失败/.test(error.message) && !/private_server|账户/.test(error.message));
+  const unknown = client.request('turn/start');
+  child.stdout.write(`${JSON.stringify({ id: messages.at(-1).id, error: { code: -32000, message: 'internal diagnostic sk-SECRET' } })}\n`);
+  await assert.rejects(unknown, error => /发送消息失败.*-32000/.test(error.message) && !/sk-SECRET/.test(error.message));
+  client.close();
+});

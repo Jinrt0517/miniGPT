@@ -9,6 +9,7 @@
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "node scripts/smoke-desktop.cjs",
     "test:clipboard": "node scripts/check-clipboard.cjs",
+    "test:chat": "node scripts/check-chat.cjs",
     "build:assets": "node scripts/build-assets.cjs",
     "pack": "node scripts/package.cjs"
   },
