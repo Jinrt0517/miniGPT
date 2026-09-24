@@ -40,15 +40,6 @@ fs.mkdirSync(testDir, { recursive: true });
     await page.locator('#prompt').dispatchEvent('keydown', { key: 'Enter', isComposing: true });
     assert.equal(await page.locator('#prompt').inputValue(), '中文输入法检查');
     await page.locator('#prompt').fill('');
-    const captureWindow = electron.waitForEvent('window', { timeout: 15000 });
-    const captured = page.evaluate(() => window.mini.invoke('attachments:screenshot'));
-    const capturePage = await captureWindow;
-    await capturePage.waitForFunction(() => document.getElementById('screen')?.src.startsWith('data:image/'));
-    await capturePage.evaluate(() => window.capture.finish({ x: 0.05, y: 0.05, width: 0.1, height: 0.1 }));
-    const attachment = await captured;
-    assert.equal(attachment.length, 1);
-    assert.equal(attachment[0].kind, 'image');
-    console.log('Region capture pipeline passed; test image was not sent.');
     if (process.env.MINIGPT_LIVE_TEST === '1') {
       const model = bootstrap.connection.models.find(m => /luna/i.test(m.model)) || bootstrap.connection.models.find(m=>m.isDefault) || bootstrap.connection.models[0];
       await page.locator('#model-select').selectOption(model.model);

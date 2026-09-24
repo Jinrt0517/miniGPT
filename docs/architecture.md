@@ -1,6 +1,6 @@
 # 实现说明
 
-miniGPT 的渲染层使用本地 HTML/CSS/JavaScript；Electron 主进程负责全局快捷键、窗口、托盘、图片剪贴板和截图。渲染进程启用 sandbox 与 contextIsolation，不开放 Node.js，仅能调用 preload 中的有限 IPC 接口。
+miniGPT 的渲染层使用本地 HTML/CSS/JavaScript；Electron 主进程负责全局快捷键、窗口、托盘和图片剪贴板。渲染进程启用 sandbox 与 contextIsolation，不开放 Node.js，仅能调用 preload 中的有限 IPC 接口。
 
 主进程通过 stdio JSONL 与本机官方 `codex app-server` 通信。登录由官方进程管理。账号返回值只取账号类型、邮箱和订阅类型；不会把令牌、原始错误日志或执行通道传给界面。
 
@@ -10,4 +10,4 @@ miniGPT 的渲染层使用本地 HTML/CSS/JavaScript；Electron 主进程负责�
 
 每次唤起发出 `new-conversation` 事件，新对话不会被旧流式事件覆盖。隐藏过程中仍可完成当前回答；重新唤起若旧回答还在生成，会停止它并开始新聊天。历史列表始终可以打开已有记录继续。重启后，以历史可见文本和图片重建隔离的临时会话。
 
-截图隐藏主窗口后获取鼠标所在显示器，在本地覆盖窗中框选。裁剪结果仅成为待发送附件，用户按发送后才进入聊天请求。应用没有监听全局剪贴板，也不持续录屏。
+用户在输入框粘贴图片或点击粘贴图片按钮时，图片先成为待发送附件，按发送后才进入聊天请求。应用没有监听全局剪贴板。

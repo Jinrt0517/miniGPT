@@ -369,7 +369,7 @@
   async function addAttachments(action) {
     const result = await invoke(action);
     const files = Array.isArray(result) ? result : result?.attachments || [];
-    if (action === 'attachments:clipboard' && !files.length && !result?.text) toast('剪贴板中没有图片，可先复制图片或截屏。');
+    if (action === 'attachments:clipboard' && !files.length && !result?.text) toast('剪贴板中没有图片，请先复制图片。');
     if (result?.text) {
       $('prompt').value += ($('prompt').value ? '\n' : '') + result.text;
       resizePrompt();
@@ -492,7 +492,6 @@
   });
   $('model-select').addEventListener('change', () => { state.model = $('model-select').value; state.effort = ''; renderEfforts(); });
   $('effort-select').addEventListener('change', () => { state.effort = $('effort-select').value; renderEfforts(); });
-  $('attach-screen').addEventListener('click', () => safely(() => addAttachments('attachments:screenshot')));
   $('attach-clipboard').addEventListener('click', () => safely(() => addAttachments('attachments:clipboard')));
   $('save-hotkey').addEventListener('click', () => safely(async () => { await saveSettings({ hotkey: $('setting-hotkey').value.trim() }); toast('快捷键设置已更新'); }));
   $('setting-pin').addEventListener('change', () => safely(() => saveSettings({ alwaysOnTop: $('setting-pin').checked })));
@@ -518,7 +517,7 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') { event.preventDefault(); safely(newConversation); }
   });
   document.addEventListener('dragover', (event) => event.preventDefault());
-  document.addEventListener('drop', (event) => { event.preventDefault(); toast('请使用区域截图，或复制图片后按 Ctrl+V 粘贴。'); });
+  document.addEventListener('drop', (event) => { event.preventDefault(); toast('请复制图片后按 Ctrl+V 粘贴。'); });
   systemTheme.addEventListener('change', applyTheme);
   window.addEventListener('resize', resizePrompt);
 

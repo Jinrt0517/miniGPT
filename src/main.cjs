@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, screen, ipcMain,
-  dialog, clipboard, shell, nativeTheme, desktopCapturer, session } = require('electron');
+  dialog, clipboard, shell, nativeTheme, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -16,7 +16,7 @@ app.setPath('userData', dataDir);
 app.setPath('sessionData', path.join(dataDir, 'chromium'));
 const settings = new SettingsStore(dataDir);
 const automatedTest = process.env.MINIGPT_TEST_HEADLESS === '1';
-let win, tray, chat, connecting, quitting = false, capturing = false;
+let win, tray, chat, connecting, quitting = false;
 let connection = { account: null, models: [], error: null };
 let hotkeyStatus = { registered: false, accelerator: settings.value.hotkey };
 const attachments = new Map();
@@ -146,49 +146,6 @@ async function pickAttachments() {
   return prepared.map(addAttachment);
 }
 
-async function captureRegion() {
-  if (capturing) return [];
-  capturing = true;
-  let overlay;
-  try {
-    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    win.hide();
-    await new Promise(resolve => setTimeout(resolve, 220));
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: {
-      width: Math.round(display.size.width * display.scaleFactor), height: Math.round(display.size.height * display.scaleFactor)
-    } });
-    const source = sources.find(item => item.display_id === String(display.id)) || (sources.length === 1 ? sources[0] : null);
-    if (!source || source.thumbnail.isEmpty()) throw new Error('无法获取当前屏幕图像');
-    const picture = source.thumbnail;
-    overlay = new BrowserWindow({ ...display.bounds, frame: false, show: false, alwaysOnTop: true, skipTaskbar: true,
-      resizable: false, movable: false, webPreferences: { preload: path.join(__dirname, 'capture-preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
-    const selection = new Promise(resolve => {
-      const handler = (event, rect) => {
-        if (event.sender !== overlay?.webContents) return;
-        ipcMain.removeListener('mini:capture-result', handler);
-        resolve(rect);
-      };
-      ipcMain.on('mini:capture-result', handler);
-      overlay.once('closed', () => { ipcMain.removeListener('mini:capture-result', handler); resolve(null); });
-    });
-    await overlay.loadFile(path.join(__dirname, 'capture.html'));
-    overlay.webContents.send('mini:capture-image', picture.toDataURL());
-    if (!automatedTest) { overlay.show(); overlay.focus(); }
-    const rect = await selection;
-    if (!rect) return [];
-    if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) throw new Error('截图区域无效');
-    const size = picture.getSize();
-    const x = Math.max(0, Math.min(size.width - 1, Math.round(rect.x * size.width)));
-    const y = Math.max(0, Math.min(size.height - 1, Math.round(rect.y * size.height)));
-    const width = Math.max(1, Math.min(size.width - x, Math.round(rect.width * size.width)));
-    const height = Math.max(1, Math.min(size.height - y, Math.round(rect.height * size.height)));
-    return [addAttachment({ type: 'image', name: `截图 ${new Date().toLocaleTimeString('zh-CN')}.png`, dataUrl: picture.crop({ x, y, width, height }).toDataURL() })];
-  } finally {
-    if (overlay && !overlay.isDestroyed()) overlay.close();
-    capturing = false; showWindow();
-  }
-}
-
 function safeExternal(url, auth = false) {
   const parsed = new URL(url);
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('只允许打开网页链接');
@@ -217,7 +174,6 @@ const actions = {
   'chat:stop': ({ conversationId }) => chat.stop(conversationId),
   'attachments:pick': pickAttachments,
   'attachments:clipboard': () => { const image = clipboard.readImage(); return image.isEmpty() ? [] : [addAttachment({ type: 'image', name: '粘贴的图片.png', dataUrl: image.toDataURL() })]; },
-  'attachments:screenshot': captureRegion,
   'settings:update': updateSettings,
   'window:hide': () => win.hide(),
   'window:expand': ({ expanded }) => { const [width] = win.getSize(); win.setSize(width, expanded ? 680 : 260); showWindow(); },
@@ -243,7 +199,7 @@ else {
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
     win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
-    win.on('blur', () => { if (settings.value.hideOnBlur && !settings.value.alwaysOnTop && !capturing) win.hide(); });
+    win.on('blur', () => { if (settings.value.hideOnBlur && !settings.value.alwaysOnTop) win.hide(); });
     ipcMain.handle('mini:invoke', async (event, action, payload) => {
       try {
         if (event.sender !== win.webContents || event.senderFrame?.url !== pageURL || !Object.hasOwn(actions, action)) throw new Error('不允许的请求');
