@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('node:events');
 const { spawn } = require('node:child_process');
+const { version } = require('../package.json');
 
 // These overrides apply only to this child process. The user's Codex settings and
 // official credential store are never opened or modified by miniGPT.
@@ -88,7 +89,7 @@ class CodexClient extends EventEmitter {
     child.once('exit', () => this._disconnect(child, new Error('Codex 连接已断开，请重新连接。')));
     try {
       await this.request('initialize', {
-        clientInfo: { name: 'miniGPT', title: 'miniGPT', version: '0.1.0' },
+        clientInfo: { name: 'miniGPT', title: 'miniGPT', version },
         capabilities: { experimentalApi: true },
       });
       this.notify('initialized', {});

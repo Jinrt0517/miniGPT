@@ -8,11 +8,40 @@
     connecting: false, panel: null, expanded: true, composing: false,
     model: '', effort: '', autoScroll: true, toastTimer: null, generation: 0, pendingGeneration: null,
     detachedConversations: new Set(), stopRequested: false,
+    historyMutation: false, historyRevision: 0, deletedConversations: new Set(), welcomeQuote: null, welcomeRequest: 0, welcomeLoading: false,
   };
   const api = window.mini;
   const effortNames = { none: '不思考', minimal: '极低', low: '低', medium: '中等', high: '高', xhigh: '超高', max: '最高', ultra: '极致' };
   const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
   const messageNodes = new Map();
+  const modelPicker = window.createSelectionControl($('model-select'), {
+    label: '模型', heading: '选择模型', iconName: 'spark', width: 244,
+  });
+  const effortPicker = window.createSelectionControl($('effort-select'), {
+    label: '思考强度', heading: '思考强度', iconName: 'reasoning', width: 224,
+    shortLabel: option => effortNames[option.value] || option.textContent,
+  });
+  async function showNextWelcomeQuote() {
+    const request = ++state.welcomeRequest;
+    state.welcomeQuote = null;
+    state.welcomeLoading = true;
+    $('welcome-quote').textContent = '正在寻找一句话…';
+    $('welcome-source').hidden = true;
+    try {
+      const quote = await invoke('quotes:next');
+      if (request !== state.welcomeRequest) return;
+      state.welcomeLoading = false;
+      state.welcomeQuote = quote;
+      $('welcome-quote').textContent = quote.text;
+      $('welcome-source').textContent = `— ${quote.source}`;
+      $('welcome-source').href = quote.url || '#';
+      $('welcome-source').hidden = !quote.url;
+    } catch {
+      if (request !== state.welcomeRequest) return;
+      state.welcomeLoading = false;
+      $('welcome-quote').textContent = '暂时无法取得在线语录。连接网络后，新聊天会继续更新。';
+    }
+  }
 
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -58,18 +87,21 @@
   function isGenerating() { return state.streaming || (state.sending && state.pendingGeneration === state.generation); }
   function updateSend() {
     const stop = isGenerating();
-    $('send-message').disabled = stop ? state.stopRequested : (state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
+    $('send-message').disabled = stop ? state.stopRequested : (state.historyMutation || state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
     $('send-message').title = stop ? state.stopRequested ? '正在停止…' : '停止生成' : !isConnected() ? needsReconnect() ? '重新连接后发送' : '登录 ChatGPT 账号后发送' : '发送 · Enter';
     $('send-message').setAttribute('aria-label', stop ? '停止生成' : '发送消息');
     // Switch the SVG reference itself; SVG elements do not reflect .hidden.
     $('send-message').querySelector('use').setAttribute('href', stop ? '#i-pause' : '#i-arrow');
     $('model-select').disabled = !isConnected() || state.streaming || state.sending;
     $('effort-select').disabled = !isConnected() || state.streaming || state.sending || !(currentModel()?.supportedReasoningEfforts?.length);
+    modelPicker.sync(); effortPicker.sync();
     $('login-button').disabled = state.connecting || state.streaming || state.sending;
     $('reconnect-button').disabled = state.connecting || state.streaming || state.sending;
     $('save-codex-path').disabled = state.connecting || state.streaming || state.sending;
+    updateHistoryControls();
   }
   function renderModels() {
+    modelPicker.close();
     const models = state.connection.models || [];
     const select = $('model-select');
     select.replaceChildren();
@@ -82,12 +114,13 @@
         const preferred = models.find((model) => modelId(model) === state.settings.model) || models.find((model) => model.isDefault) || models[0];
         state.model = modelId(preferred);
       }
-      models.forEach((model) => select.append(new Option(model.displayName || modelId(model), modelId(model))));
+      models.forEach(model => select.append(new Option(model.displayName || modelId(model), modelId(model))));
       select.value = state.model;
     }
     renderEfforts();
   }
   function renderEfforts() {
+    effortPicker.close();
     const select = $('effort-select');
     const model = currentModel();
     const efforts = model?.supportedReasoningEfforts || [];
@@ -102,7 +135,6 @@
       efforts.forEach((item) => {
         const value = typeof item === 'string' ? item : item.reasoningEffort;
         const option = new Option(`思考 · ${effortNames[value] || value}`, value);
-        if (item.description) option.title = item.description;
         select.append(option);
       });
       select.value = state.effort;
@@ -178,6 +210,8 @@
     $('setting-pin').checked = Boolean(state.settings.alwaysOnTop);
     $('pin-toggle').setAttribute('aria-pressed', String(Boolean(state.settings.alwaysOnTop)));
     $('pin-toggle').title = state.settings.alwaysOnTop ? '取消窗口置顶' : '置顶窗口';
+    $('pin-toggle').setAttribute('aria-label', $('pin-toggle').title);
+    $('pin-toggle').querySelector('use').setAttribute('href', state.settings.alwaysOnTop ? '#i-pin-filled' : '#i-pin');
     $('setting-hide-blur').checked = Boolean(state.settings.hideOnBlur);
     $('setting-follow-mouse').checked = state.settings.followCursor !== false;
     $('setting-autostart').checked = Boolean(state.settings.launchAtLogin);
@@ -205,8 +239,9 @@
     resizePrompt();
   }
   async function openPanel(panel) {
+    modelPicker.close(); effortPicker.close();
     if (state.panel === panel) { closePanel(); return; }
-    await setExpanded(true);
+    if (!state.expanded) await setExpanded(true);
     state.panel = panel;
     $('history-panel').hidden = panel !== 'history';
     $('settings-panel').hidden = panel !== 'settings';
@@ -285,7 +320,9 @@
   function renderConversation() {
     const messages = state.conversation?.messages || [];
     const welcome = !messages.length;
+    if (welcome && !state.welcomeQuote && !state.welcomeLoading) showNextWelcomeQuote();
     $('welcome').hidden = !welcome;
+    $('new-chat').hidden = welcome;
     $('app').dataset.view = welcome ? 'welcome' : 'conversation';
     const ids = new Set(messages.map((message) => message.id));
     for (const [id, node] of messageNodes) if (!ids.has(id)) { node.remove(); messageNodes.delete(id); }
@@ -295,6 +332,7 @@
   }
   function scrollToBottom() { const area = $('conversation-area'); area.scrollTop = area.scrollHeight; $('scroll-bottom').hidden = true; }
   function upsertConversation(conversation) {
+    if (state.deletedConversations.has(conversation.id)) return;
     const existing = state.conversations.findIndex((item) => item.id === conversation.id);
     if (existing >= 0) state.conversations[existing] = conversation; else state.conversations.unshift(conversation);
     renderHistory();
@@ -311,6 +349,7 @@
     renderConversation();
   }
   async function newConversation() {
+    showNextWelcomeQuote();
     const oldId = state.conversation?.id;
     const shouldStop = (state.streaming || state.sending) && oldId;
     if (oldId) state.detachedConversations.add(oldId);
@@ -327,16 +366,93 @@
     if (shouldStop) await invoke('chat:stop', { conversationId: oldId });
   }
   async function refreshHistory() {
+    const revision = ++state.historyRevision;
     const result = await invoke('conversations:list');
-    state.conversations = Array.isArray(result) ? result : result?.conversations || [];
+    if (revision !== state.historyRevision) return;
+    state.conversations = (Array.isArray(result) ? result : result?.conversations || []).filter(item => !state.deletedConversations.has(item.id));
     renderHistory();
+  }
+  function historyIsGenerating() {
+    return state.streaming || state.sending || state.conversations.some(item => ['generating', 'streaming', 'running'].includes(item.status));
+  }
+  function updateHistoryControls() {
+    const busy = state.historyMutation;
+    const generating = historyIsGenerating();
+    const clear = $('history-clear');
+    clear.disabled = busy || !state.conversations.length || generating;
+    clear.title = generating ? '请先停止当前回答，再清空历史记录' : '清空全部历史记录';
+    $('history-clear-confirm').disabled = busy || !state.conversations.length || generating;
+    $('history-clear-confirm').textContent = busy ? '正在清空…' : '确认清空';
+    $('history-clear-cancel').disabled = busy;
+    $('history-list').setAttribute('aria-busy', String(busy));
+    document.querySelectorAll('.history-open').forEach(control => { control.disabled = busy; });
+    const conversations = new Map(state.conversations.map(item => [item.id, item]));
+    document.querySelectorAll('.history-delete').forEach(control => {
+      const conversation = conversations.get(control.dataset.conversationId);
+      control.disabled = busy || state.sending || ['generating', 'streaming', 'running'].includes(conversation?.status) || (state.streaming && state.conversation?.id === conversation?.id);
+    });
+  }
+  function forgetConversations(ids) {
+    state.historyRevision += 1;
+    for (const id of ids) { state.deletedConversations.add(id); state.detachedConversations.delete(id); }
+    state.conversations = state.conversations.filter(item => !state.deletedConversations.has(item.id));
+    if (state.deletedConversations.has(state.conversation?.id)) {
+      state.conversation = null;
+      state.streaming = false;
+      state.stopRequested = false;
+      showNextWelcomeQuote();
+      renderConversation();
+    }
+  }
+  async function deleteConversation(id) {
+    const conversation = state.conversations.find(item => item.id === id);
+    if (state.historyMutation || state.sending || ['generating', 'streaming', 'running'].includes(conversation?.status) || (state.streaming && state.conversation?.id === id)) return;
+    state.historyMutation = true;
+    $('history-error').hidden = true;
+    clearError(); updateSend();
+    try {
+      await invoke('conversations:delete', { id });
+      forgetConversations([id]);
+    } catch (error) {
+      $('history-error').textContent = errorMessage(error);
+      $('history-error').hidden = false;
+      throw error;
+    } finally {
+      state.historyMutation = false;
+      renderHistory(); updateSend();
+    }
+  }
+  function confirmClearHistory() {
+    if (state.historyMutation || !state.conversations.length || historyIsGenerating()) return;
+    $('history-clear-description').textContent = `将删除全部 ${state.conversations.length} 条本地对话及已保存的附件，无法撤销。搜索筛选不会限制清空范围。`;
+    $('history-clear-error').hidden = true;
+    $('history-clear-dialog').showModal();
+  }
+  async function clearHistory() {
+    if (state.historyMutation || !state.conversations.length || historyIsGenerating()) return;
+    state.historyMutation = true;
+    $('history-clear-error').hidden = true;
+    $('history-error').hidden = true;
+    clearError(); updateSend();
+    try {
+      await invoke('conversations:clear');
+      forgetConversations(state.conversations.map(item => item.id));
+      $('history-search').value = '';
+      $('history-clear-dialog').close();
+    } catch (error) {
+      $('history-clear-error').textContent = errorMessage(error);
+      $('history-clear-error').hidden = false;
+    } finally {
+      state.historyMutation = false;
+      renderHistory(); updateSend();
+    }
   }
   function renderHistory() {
     const list = $('history-list'); list.replaceChildren();
     const query = $('history-search').value.trim().toLowerCase();
     const conversations = state.conversations.filter((item) => !query || (item.title || '').toLowerCase().includes(query)).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
     if (!conversations.length) {
-      const empty = document.createElement('div'); empty.className = 'history-empty'; empty.textContent = query ? '没有找到相关对话' : '还没有对话。\n从一个小问题开始吧。'; list.append(empty); return;
+      const empty = document.createElement('div'); empty.className = 'history-empty'; empty.textContent = query ? '没有找到相关对话' : '还没有对话。\n从一个小问题开始吧。'; list.append(empty); updateHistoryControls(); return;
     }
     let lastGroup = '';
     conversations.forEach((conversation) => {
@@ -345,27 +461,22 @@
       if (group !== lastGroup) { const label = document.createElement('div'); label.className = 'history-group-label'; label.textContent = group; list.append(label); lastGroup = group; }
       const row = document.createElement('div'); row.className = `history-item${state.conversation?.id === conversation.id ? ' active' : ''}`;
       const open = button(conversation.title || '新对话', 'history-open', () => safely(async () => {
+        if (state.historyMutation) return;
         if (state.streaming || state.sending) { toast('请先停止当前回答，再切换对话。'); return; }
         const result = await invoke('conversations:get', { id: conversation.id });
-        if (!result) throw new Error('这段对话已不存在。');
+        if (!result || state.deletedConversations.has(conversation.id)) throw new Error('这段对话已不存在。');
+        if (state.historyMutation) return;
         state.autoScroll = true; state.detachedConversations.delete(conversation.id); setConversation(result.conversation || result); closePanel();
       }));
       open.replaceChildren();
       const title = document.createElement('span'); title.className = 'history-title'; title.textContent = conversation.title || '新对话';
       const detail = document.createElement('span'); detail.className = 'history-date'; detail.textContent = `${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}${conversation.model ? ` · ${conversation.model}` : ''}`;
       open.append(title, detail); row.append(open);
-      const remove = button('删除此对话', 'icon-button history-delete', () => safely(async () => {
-        if ((state.streaming || state.sending) && state.conversation?.id === conversation.id) { toast('请先停止当前回答。'); return; }
-        if (remove.dataset.confirm !== 'true') {
-          remove.dataset.confirm = 'true'; remove.replaceChildren(icon('check')); remove.title = '再次点击确认删除';
-          setTimeout(() => { if (remove.isConnected) { remove.dataset.confirm = 'false'; remove.replaceChildren(icon('trash')); remove.title = '删除此对话'; } }, 3500); return;
-        }
-        await invoke('conversations:delete', { id: conversation.id });
-        state.conversations = state.conversations.filter((item) => item.id !== conversation.id);
-        if (state.conversation?.id === conversation.id) { state.conversation = null; renderConversation(); }
-        renderHistory(); toast('对话已删除');
-      }), 'trash'); row.append(remove); list.append(row);
+      const remove = button('删除此对话', 'icon-button history-delete', () => safely(() => deleteConversation(conversation.id)), 'trash');
+      remove.dataset.conversationId = conversation.id;
+      row.append(remove); list.append(row);
     });
+    updateHistoryControls();
   }
   function renderAttachments() {
     const container = $('attachments'); container.replaceChildren(); container.hidden = !state.attachments.length;
@@ -410,7 +521,7 @@
     }
     const text = $('prompt').value.trim();
     const draftText = $('prompt').value;
-    if (state.sending || (!text && !state.attachments.length) || !isConnected()) return;
+    if (state.historyMutation || state.sending || (!text && !state.attachments.length) || !isConnected()) return;
     clearError();
     const originalAttachments = state.attachments.slice();
     const conversationBefore = state.conversation?.id;
@@ -450,6 +561,7 @@
   function onEvent(event) {
     try {
       if (!event || !event.type) return;
+      if (state.deletedConversations.has(event.conversation?.id || event.conversationId)) return;
       if (event.type === 'connection') setConnection(event.connection);
       else if (event.type === 'settings') applySettings(event.settings, event.hotkeyStatus);
       else if (event.type === 'focus') $('prompt').focus();
@@ -492,12 +604,20 @@
   }
 
   $('new-chat').addEventListener('click', () => safely(newConversation));
+  $('welcome-source').addEventListener('click', event => {
+    event.preventDefault();
+    if (state.welcomeQuote?.url) safely(() => invoke('link:open', { url: state.welcomeQuote.url }));
+  });
   $('history-toggle').addEventListener('click', () => safely(() => openPanel('history')));
   $('settings-toggle').addEventListener('click', () => safely(() => openPanel('settings')));
   $('account-status').addEventListener('click', () => safely(() => openPanel('settings')));
   $('panel-backdrop').addEventListener('click', closePanel);
   document.querySelectorAll('.panel-close').forEach((element) => element.addEventListener('click', closePanel));
   $('history-search').addEventListener('input', renderHistory);
+  $('history-clear').addEventListener('click', confirmClearHistory);
+  $('history-clear-confirm').addEventListener('click', () => safely(clearHistory));
+  $('history-clear-cancel').addEventListener('click', () => $('history-clear-dialog').close());
+  $('history-clear-dialog').addEventListener('cancel', event => { if (state.historyMutation) event.preventDefault(); });
   $('pin-toggle').addEventListener('click', () => safely(async () => {
     const pinned = !state.settings.alwaysOnTop;
     const result = await invoke('window:pin', { pinned });
@@ -523,9 +643,14 @@
       event.preventDefault(); safely(() => addAttachments('attachments:clipboard'));
     }
   });
-  $('model-select').addEventListener('change', () => { state.model = $('model-select').value; state.effort = ''; renderEfforts(); });
-  $('effort-select').addEventListener('change', () => { state.effort = $('effort-select').value; renderEfforts(); });
-  $('attach-clipboard').addEventListener('click', () => safely(() => addAttachments('attachments:clipboard')));
+  $('model-select').addEventListener('change', () => {
+    state.model = $('model-select').value; state.effort = ''; renderEfforts();
+    safely(() => saveSettings({ model: state.model, effort: state.effort }));
+  });
+  $('effort-select').addEventListener('change', () => {
+    state.effort = $('effort-select').value; renderEfforts();
+    safely(() => saveSettings({ model: state.model, effort: state.effort }));
+  });
   $('save-hotkey').addEventListener('click', () => safely(async () => { await saveSettings({ hotkey: $('setting-hotkey').value.trim() }); toast('快捷键设置已更新'); }));
   $('setting-pin').addEventListener('change', () => safely(() => saveSettings({ alwaysOnTop: $('setting-pin').checked })));
   $('setting-hide-blur').addEventListener('change', () => safely(() => saveSettings({ hideOnBlur: $('setting-hide-blur').checked })));
@@ -546,7 +671,17 @@
   });
   document.addEventListener('keydown', (event) => {
     if (event.isComposing || state.composing) return;
-    if (event.key === 'Escape') { event.preventDefault(); if (state.panel) closePanel(); else safely(() => invoke('window:hide')); }
+    if ($('history-clear-dialog').open) {
+      if (event.key === 'Escape') { event.preventDefault(); if (!state.historyMutation) $('history-clear-dialog').close(); }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (modelPicker.isOpen()) modelPicker.close(true);
+      else if (effortPicker.isOpen()) effortPicker.close(true);
+      else if (state.panel) closePanel();
+      else safely(() => invoke('window:hide'));
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') { event.preventDefault(); safely(newConversation); }
   });
   document.addEventListener('dragover', (event) => event.preventDefault());
@@ -559,7 +694,20 @@
     if (api?.onEvent) api.onEvent(onEvent);
     try {
       const result = await invoke('bootstrap');
+      document.querySelector('.version-label').textContent = result.version || '';
       applySettings(result.settings, result.hotkeyStatus);
+      // A connection event may arrive before bootstrap finishes. Restore the
+      // saved choice before rendering the connected model list.
+      const recent = result.conversations?.find(item => item.model);
+      state.model = state.settings.model || recent?.model || '';
+      state.effort = state.settings.model ? state.settings.effort || '' : recent?.effort || '';
+      if (!state.settings.model && recent?.model) {
+        try { await saveSettings({ model: state.model, effort: state.effort }); }
+        catch (error) { showError(error); }
+      }
+      state.expanded = window.innerHeight > 280;
+      $('app').classList.toggle('compact', !state.expanded);
+      $('expand-window').title = state.expanded ? '切换紧凑窗口' : '展开对话窗口';
       state.conversations = result.conversations || [];
       setConnection(result.connection);
       renderHistory(); renderConversation(); resizePrompt();
@@ -568,5 +716,6 @@
       state.connecting = false; state.connection.error = errorMessage(error); renderConnection(); showError(error);
     }
   }
+  showNextWelcomeQuote();
   bootstrap();
 })();

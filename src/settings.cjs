@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULTS = Object.freeze({ hotkey: 'Alt+Space', hideOnBlur: false, alwaysOnTop: false,
-  launchAtLogin: false, theme: 'system', followCursor: true, codexPath: '' });
+  launchAtLogin: false, theme: 'system', followCursor: true, codexPath: '', model: '', effort: '' });
 
 function validateSettings(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('设置格式不正确');
@@ -13,6 +13,8 @@ function validateSettings(patch) {
       if (typeof value !== 'boolean') throw new Error('设置值必须为开或关');
     } else if (typeof value !== 'string') throw new Error('设置值必须为文字');
     if (key === 'theme' && !['system', 'light', 'dark'].includes(value)) throw new Error('未知主题');
+    if (key === 'model' && value.length > 200) throw new Error('模型名称过长');
+    if (key === 'effort' && !['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value)) throw new Error('未知思考强度');
     if (key === 'hotkey' && (!/^(?:(?:Alt|Control|Ctrl|Shift|Super|CommandOrControl)\+)+(?:Space|[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4]))$/i.test(value) || value.length > 80)) {
       throw new Error('快捷键示例：Alt+Space 或 Control+Shift+Space');
     }

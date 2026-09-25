@@ -3,10 +3,13 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, screen, ipc
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const { SettingsStore, validateSettings } = require('./settings.cjs');
 const { ChatService } = require('./chat-service.cjs');
+const { QuoteService } = require('./quote-service.cjs');
 const { readClipboardImages } = require('./clipboard.cjs');
+const { MIN_WINDOW_SIZE, WindowStateStore, restoreWindowState, setWindowBounds, boundsOnDisplay, trackWindowState } = require('./window-state.cjs');
 
 app.setName('miniGPT');
 // The text-first window also runs on Windows systems without a working GPU driver.
@@ -16,8 +19,12 @@ fs.mkdirSync(dataDir, { recursive: true });
 app.setPath('userData', dataDir);
 app.setPath('sessionData', path.join(dataDir, 'chromium'));
 const settings = new SettingsStore(dataDir);
+const windowStateStore = new WindowStateStore(dataDir);
+const quoteService = new QuoteService(dataDir);
 const automatedTest = process.env.MINIGPT_TEST_HEADLESS === '1';
 let win, tray, chat, connecting, quitting = false;
+let taskbarHelper;
+let windowStateTracker, pendingMaximized = false, pendingRestoredPosition = false;
 let connection = { account: null, models: [], error: null };
 let hotkeyStatus = { registered: false, accelerator: settings.value.hotkey };
 const attachments = new Map();
@@ -49,18 +56,35 @@ function installShortcut(accelerator) {
   return { registered: true, accelerator };
 }
 
-function showWindow(fresh = false) {
+function prepareTaskbarForShow() {
+  if (!taskbarHelper || automatedTest) return;
+  const handle = win.getNativeWindowHandle();
+  const hwnd = handle.length === 8 ? handle.readBigUInt64LE() : BigInt(handle.readUInt32LE());
+  // Mark before activation: applying this after show/focus can flash the taskbar.
+  // The helper only adjusts our HWND's shell hint when another window is fullscreen.
+  const result = spawnSync(taskbarHelper, [hwnd.toString()], { windowsHide: true, timeout: 3000 });
+  if (result.error || result.status !== 0) console.warn('miniGPT could not preserve the fullscreen taskbar state.');
+}
+
+function showWindow(fresh = false, followCursor = true) {
   if (!win || win.isDestroyed()) return;
-  const display = settings.value.followCursor ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint()) : screen.getDisplayMatching(win.getBounds());
-  const area = display.workArea;
-  const [width, height] = win.getSize();
-  const bounds = win.getBounds();
-  const w = Math.min(width, area.width), h = Math.min(height, area.height);
-  const x = settings.value.followCursor ? Math.round(area.x + (area.width - w) / 2) : Math.max(area.x, Math.min(bounds.x, area.x + area.width - w));
-  const y = settings.value.followCursor ? Math.round(area.y + (area.height - h) * 0.34) : Math.max(area.y, Math.min(bounds.y, area.y + area.height - h));
-  win.setBounds({ x, y, width: w, height: h });
-  if (win.isMinimized()) win.restore();
-  if (!automatedTest) { win.show(); win.focus(); }
+  if (win.isMinimized()) { prepareTaskbarForShow(); win.restore(); }
+  if (!win.isMaximized() && !pendingMaximized && !pendingRestoredPosition) {
+    const bounds = win.getBounds();
+    const currentDisplay = screen.getDisplayMatching(bounds);
+    const targetDisplay = followCursor && settings.value.followCursor
+      ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint()) : currentDisplay;
+    // Reopening on the same screen must not overwrite the user's placement.
+    // Following another screen carries over its relative position instead of centering.
+    setWindowBounds(win, boundsOnDisplay(bounds, currentDisplay, targetDisplay));
+  }
+  if (!automatedTest) {
+    prepareTaskbarForShow();
+    if (pendingMaximized) { win.maximize(); pendingMaximized = false; }
+    else win.show();
+    win.focus();
+  }
+  pendingRestoredPosition = false;
   if (fresh === true) sendEvent({ type: 'new-conversation' });
   sendEvent({ type: 'focus' });
 }
@@ -88,7 +112,9 @@ function updateSettings(patch) {
   }
   const value = settings.save(patch);
   nativeTheme.themeSource = value.theme;
-  win?.setAlwaysOnTop(value.alwaysOnTop);
+  // The default floating level follows the taskbar's z-order on Windows, which
+  // can demote our pinned window when the taskbar is behind fullscreen content.
+  win?.setAlwaysOnTop(value.alwaysOnTop, process.platform === 'win32' ? 'pop-up-menu' : 'floating');
   updateTray();
   sendEvent({ type: 'settings', settings: value, hotkeyStatus });
   return { settings: value, hotkeyStatus };
@@ -155,12 +181,14 @@ function safeExternal(url, auth = false) {
 }
 
 const actions = {
-  bootstrap: async () => ({ settings: settings.value, connection, conversations: chat ? await chat.listConversations() : [], hotkeyStatus }),
+  bootstrap: async () => ({ version: app.getVersion(), settings: settings.value, connection, conversations: chat ? await chat.listConversations() : [], hotkeyStatus }),
+  'quotes:next': () => quoteService.next(),
   connect,
   login: async () => { if (!chat) await connect(); const result = await chat.login(); if (result.authUrl) await safeExternal(result.authUrl, true); return result; },
   'conversations:list': () => chat.listConversations(),
   'conversations:get': ({ id }) => chat.getConversation(id),
   'conversations:delete': ({ id }) => chat.deleteConversation(id),
+  'conversations:clear': () => chat.clearConversations(),
   'chat:send': async payload => {
     if (connection.account?.type !== 'chatgpt') throw new Error('请先使用 ChatGPT 账号登录');
     if (!payload || typeof payload.text !== 'string' || payload.text.length > 100000) throw new Error('消息为空或过长');
@@ -177,7 +205,10 @@ const actions = {
   'attachments:clipboard': async () => (await readClipboardImages({ clipboard, nativeImage })).map(addAttachment),
   'settings:update': updateSettings,
   'window:hide': () => win.hide(),
-  'window:expand': ({ expanded }) => { const [width] = win.getSize(); win.setSize(width, expanded ? 680 : 260); showWindow(); },
+  'window:expand': ({ expanded }) => {
+    setWindowBounds(win, { ...win.getBounds(), height: expanded ? 680 : 260 });
+    showWindow(false, false);
+  },
   'window:pin': ({ pinned }) => updateSettings({ alwaysOnTop: pinned }),
   'app:quit': () => { quitting = true; app.quit(); },
   'clipboard:write': async ({ text }) => { if (typeof text !== 'string' || text.length > 2000000) throw new Error('复制内容无效'); await clipboard.writeText(text); },
@@ -188,15 +219,31 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => showWindow(!win?.isVisible()));
   app.whenReady().then(async () => {
+    if (process.platform === 'win32') {
+      taskbarHelper = app.isPackaged ? path.join(__dirname, '..', 'assets', 'windows-taskbar.exe')
+        : require('../scripts/build-native.cjs').buildNative();
+    }
     nativeTheme.themeSource = settings.value.theme;
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.defaultSession.setPermissionCheckHandler(() => false);
-    win = new BrowserWindow({ width: 600, height: 480, minWidth: 480, minHeight: 260,
+    const restoredState = restoreWindowState(windowStateStore.value, screen.getAllDisplays(), screen.getPrimaryDisplay());
+    const initialBounds = restoredState?.bounds || { width: 600, height: 480 };
+    pendingMaximized = restoredState?.maximized === true;
+    pendingRestoredPosition = Boolean(restoredState);
+    win = new BrowserWindow({ ...initialBounds,
+      minWidth: Math.min(MIN_WINDOW_SIZE.width, initialBounds.width), minHeight: Math.min(MIN_WINDOW_SIZE.height, initialBounds.height),
       title: 'miniGPT', frame: false, show: false, backgroundColor: '#f8f9fb',
-      alwaysOnTop: settings.value.alwaysOnTop, autoHideMenuBar: true,
+      // Exclude the window from the taskbar and Alt+Tab at creation, while keeping
+      // keyboard focus and the native resize frame for the chat window.
+      ...(process.platform === 'win32' ? { type: 'toolbar' } : {}),
+      skipTaskbar: true,
+      alwaysOnTop: false, autoHideMenuBar: true,
       icon: path.join(__dirname, '..', 'assets', 'icon.png'),
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false }
     });
+    win.setAlwaysOnTop(settings.value.alwaysOnTop, process.platform === 'win32' ? 'pop-up-menu' : 'floating');
+    if (restoredState) setWindowBounds(win, restoredState.bounds);
+    windowStateTracker = trackWindowState(win, windowStateStore, { isMaximized: () => pendingMaximized || win.isMaximized() });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
     win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
@@ -213,8 +260,12 @@ else {
     await win.loadURL(pageURL);
     if (!process.argv.includes('--hidden')) showWindow();
     connect();
-  }).catch(error => { dialog.showErrorBox('miniGPT 启动失败', error.message); quitting = true; app.quit(); });
+  }).catch(error => {
+    if (automatedTest) console.error('miniGPT startup failed:', error);
+    else dialog.showErrorBox('miniGPT 启动失败', error.message);
+    quitting = true; app.quit();
+  });
 }
 app.on('window-all-closed', () => {});
-app.on('before-quit', () => { quitting = true; chat?.close(); });
+app.on('before-quit', () => { quitting = true; windowStateTracker?.save(); chat?.close(); });
 app.on('will-quit', () => { globalShortcut.unregisterAll(); tray?.destroy(); });

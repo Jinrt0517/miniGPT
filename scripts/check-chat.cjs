@@ -19,7 +19,7 @@ async function main() {
   const env = { ...process.env, MINIGPT_DATA_DIR: testDir, MINIGPT_TEST_HEADLESS: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   const electron = await _electron.launch({
-    executablePath: path.join(root, 'dist', 'miniGPT-win32-x64', 'miniGPT.exe'),
+    executablePath: process.env.MINIGPT_TEST_EXECUTABLE || path.join(root, 'dist', 'miniGPT-win32-x64', 'miniGPT.exe'),
     args: [], env, timeout: 30000,
   });
   let page;
@@ -67,8 +67,8 @@ async function main() {
       const order = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
       const effort = preferLow && efforts.includes('low') ? 'low' : order.find(value => efforts.includes(value)) || efforts[0];
       assert.ok(effort, 'The model must advertise a reasoning effort');
-      await page.locator('#model-select').selectOption(model.model);
-      await page.locator('#effort-select').selectOption(effort);
+      await page.locator('#model-select').selectOption(model.model, { force: true });
+      await page.locator('#effort-select').selectOption(effort, { force: true });
       return { model: model.model, effort };
     }
 
@@ -142,7 +142,14 @@ async function main() {
       }];
     }, dataUrl);
     clipboardOverridden = true;
-    await page.locator('#attach-clipboard').click();
+    assert.equal(await page.locator('#attach-clipboard').count(), 0);
+    await page.locator('#prompt').focus();
+    await page.evaluate(image => {
+      const bytes = Uint8Array.from(atob(image.slice(image.indexOf(',') + 1)), character => character.charCodeAt(0));
+      const clipboardData = new DataTransfer();
+      clipboardData.items.add(new File([bytes], 'test-red.png', { type: 'image/png' }));
+      document.getElementById('prompt').dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+    }, dataUrl);
     await page.waitForFunction(() => document.querySelectorAll('#attachments .attachment-chip').length === 1, null, { timeout: 10000 });
     const imageReply = await sendAndCheck('Pasted image conversation', '这张图片的主要颜色是什么？用中文只回答颜色。', /红/);
     assert.notEqual(imageReply.conversationId, first.conversationId);

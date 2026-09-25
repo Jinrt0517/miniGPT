@@ -199,6 +199,146 @@ test('cancel interrupts only an owned turn and late notifications cannot corrupt
   assert.equal(client.calls.some((c) => c.method === 'thread/archive' || c.method === 'account/logout'), false);
 });
 
+test('deleting history commits to disk before removing in-memory history and attachments', async (t) => {
+  const { service, client, dataDir } = setup(t);
+  const { conversationId } = await service.send({ text: 'keep until saved', attachments: [{ type: 'text', name: 'note.txt', text: 'saved attachment' }] });
+  finish(client, service, conversationId);
+  const before = service.getConversation(conversationId);
+  const threadId = service.remoteThreads.get(conversationId);
+  const stored = fs.readFileSync(service.storePath, 'utf8');
+  const save = service._save;
+  service._save = () => { throw new Error('disk unavailable'); };
+  await assert.rejects(service.deleteConversation(conversationId), /disk unavailable/);
+  assert.deepEqual(service.getConversation(conversationId), before);
+  assert.equal(service.savedAttachments.size, 1);
+  assert.equal(service.remoteThreads.get(conversationId), threadId);
+  assert.equal(service.threadOwners.get(threadId), conversationId);
+  assert.equal(fs.readFileSync(service.storePath, 'utf8'), stored);
+  service._save = save;
+  assert.deepEqual(await service.deleteConversation(conversationId), { deleted: true });
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(service.savedAttachments.size, 0);
+  assert.equal(service.remoteThreads.size, 0);
+  assert.equal(service.threadOwners.size, 0);
+  const restored = new ChatService({ dataDir, clientFactory: () => new MockClient() });
+  assert.deepEqual(restored.listConversations(), []);
+  assert.equal(restored.savedAttachments.size, 0);
+  restored.close();
+});
+
+test('deleting during thread creation cannot restore ownership or emit deleted history', async (t) => {
+  const { service, client, events } = setup(t);
+  await service.connect();
+  let resolveThread;
+  client.override = async (method) => method === 'thread/start' ? new Promise((resolve) => { resolveThread = resolve; }) : undefined;
+  const pending = service.send({ text: 'delete while opening thread' });
+  const id = service.listConversations()[0].id;
+  assert.deepEqual(await service.deleteConversation(id), { deleted: true });
+  const eventCount = events.length;
+  resolveThread({ thread: { id: 'deleted-thread', ephemeral: true, environments: [] }, sandbox: { type: 'readOnly', networkAccess: false } });
+  await pending;
+  assert.equal(client.calls.some((call) => call.method === 'turn/start'), false);
+  assert.deepEqual(events.slice(eventCount), []);
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(service.active.size, 0);
+  assert.equal(service.remoteThreads.size, 0);
+  assert.equal(service.threadOwners.size, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(service.storePath, 'utf8')).conversations, []);
+});
+
+test('deleting during turn creation interrupts the late turn without restoring history', async (t) => {
+  const { service, client, events } = setup(t);
+  await service.connect();
+  let resolveTurn;
+  let announceTurn;
+  const turnStarted = new Promise((resolve) => { announceTurn = resolve; });
+  client.override = async (method) => {
+    if (method !== 'turn/start') return undefined;
+    return new Promise((resolve) => { resolveTurn = resolve; announceTurn(); });
+  };
+  const pending = service.send({ text: 'delete while starting turn' });
+  await turnStarted;
+  const id = service.listConversations()[0].id;
+  const threadId = service.remoteThreads.get(id);
+  assert.deepEqual(await service.deleteConversation(id), { deleted: true });
+  const eventCount = events.length;
+  resolveTurn({ turn: { id: 'late-turn' } });
+  await pending;
+  assert.deepEqual(client.calls.at(-1), { method: 'turn/interrupt', params: { threadId, turnId: 'late-turn' } });
+  client.emit('notification', 'turn/completed', { threadId, turn: { id: 'late-turn', status: 'completed', items: [{ id: 'answer', type: 'agentMessage', text: 'late answer' }] } });
+  assert.deepEqual(events.slice(eventCount), []);
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(service.active.size, 0);
+  assert.equal(service.remoteThreads.size, 0);
+  assert.equal(service.threadOwners.size, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(service.storePath, 'utf8')).conversations, []);
+});
+
+test('clear history removes every conversation, saved attachment, and ephemeral ownership across restarts', async (t) => {
+  const { service, client, dataDir } = setup(t);
+  for (const attachment of [
+    { type: 'text', name: 'note.txt', text: 'private attachment' },
+    { type: 'image', name: 'capture.png', dataUrl: 'data:image/png;base64,YQ==' },
+  ]) {
+    const { conversationId } = await service.send({ text: 'saved history', attachments: [attachment] });
+    finish(client, service, conversationId);
+  }
+  assert.equal(service.savedAttachments.size, 2);
+  assert.equal(service.remoteThreads.size, 2);
+  assert.deepEqual(await service.clearConversations(), { deleted: true, count: 2 });
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(service.savedAttachments.size, 0);
+  assert.equal(service.remoteThreads.size, 0);
+  assert.equal(service.threadOwners.size, 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(service.storePath, 'utf8')), { version: 1, conversations: [], attachments: {} });
+  const restored = new ChatService({ dataDir, clientFactory: () => new MockClient() });
+  assert.deepEqual(restored.listConversations(), []);
+  assert.equal(restored.savedAttachments.size, 0);
+  restored.close();
+  assert.deepEqual(await service.clearConversations(), { deleted: true, count: 0 });
+  assert.equal(client.calls.some((call) => call.method === 'thread/archive' || call.method === 'account/logout'), false);
+});
+
+test('clear history retains history, attachments, and ownership if persistence fails', async (t) => {
+  const { service, client } = setup(t);
+  const { conversationId } = await service.send({ text: 'retain on failure', attachments: [{ type: 'text', name: 'note.txt', text: 'retain content' }] });
+  finish(client, service, conversationId);
+  const stored = fs.readFileSync(service.storePath, 'utf8');
+  const save = service._save;
+  service._save = () => { throw new Error('disk unavailable'); };
+  await assert.rejects(service.clearConversations(), /disk unavailable/);
+  assert.equal(service.listConversations().length, 1);
+  assert.equal(service.savedAttachments.size, 1);
+  assert.equal(service.remoteThreads.size, 1);
+  assert.equal(service.threadOwners.size, 1);
+  assert.equal(fs.readFileSync(service.storePath, 'utf8'), stored);
+  service._save = save;
+});
+
+test('clear history rejects during generation and while a send is connecting', async (t) => {
+  const { service, client } = setup(t);
+  let resolveConnection;
+  client.connect = () => new Promise((resolve) => { resolveConnection = () => { client.ready = true; resolve(); }; });
+  const pending = service.send({ text: 'still sending' });
+  assert.equal(service.active.size, 0);
+  await assert.rejects(service.clearConversations(), /停止生成或等待发送完成/);
+  resolveConnection();
+  const { conversationId } = await pending;
+  await assert.rejects(service.clearConversations(), /停止生成或等待发送完成/);
+  assert.equal(service.listConversations().length, 1);
+  await service.stop(conversationId);
+  assert.deepEqual(await service.clearConversations(), { deleted: true, count: 1 });
+});
+
+test('clear history in nonpersistent mode removes memory without writing a history file', async (t) => {
+  const { service, client } = setup(t, { persistHistory: false });
+  const { conversationId } = await service.send({ text: 'session history' });
+  finish(client, service, conversationId);
+  assert.deepEqual(await service.clearConversations(), { deleted: true, count: 1 });
+  assert.deepEqual(service.listConversations(), []);
+  assert.equal(fs.existsSync(service.storePath), false);
+});
+
 test('refuses a CLI that does not enforce the safe configuration or no-environment thread', async (t) => {
   const { service, client } = setup(t);
   client.override = async (method) => method === 'config/read' ? { config: { ...SAFE_CONFIG, features: { ...SAFE_CONFIG.features, shell_tool: true } } } : undefined;

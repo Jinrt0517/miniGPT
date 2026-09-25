@@ -23,6 +23,7 @@ class ChatService extends EventEmitter {
     this.conversations = new Map();
     this.savedAttachments = new Map();
     this.active = new Map();
+    this.pendingSends = 0;
     this.remoteThreads = new Map();
     this.threadOwners = new Map();
     this.models = [];
@@ -80,11 +81,11 @@ class ChatService extends EventEmitter {
     }
   }
 
-  _save() {
+  _save(conversations = this.conversations, savedAttachments = this.savedAttachments) {
     if (!this.persistHistory) return;
     const temporary = `${this.storePath}.tmp`;
     try {
-      fs.writeFileSync(temporary, JSON.stringify({ version: 1, conversations: [...this.conversations.values()], attachments: Object.fromEntries(this.savedAttachments) }), { mode: 0o600 });
+      fs.writeFileSync(temporary, JSON.stringify({ version: 1, conversations: [...conversations.values()], attachments: Object.fromEntries(savedAttachments) }), { mode: 0o600 });
       fs.renameSync(temporary, this.storePath);
     } catch { throw new Error('无法保存本地会话，请检查磁盘空间和文件夹权限。'); }
   }
@@ -215,7 +216,13 @@ class ChatService extends EventEmitter {
     return { input, metadata };
   }
 
-  async send({ conversationId, text = '', model: modelValue, effort: effortValue, attachments = [] } = {}) {
+  async send(options = {}) {
+    this.pendingSends++;
+    try { return await this._send(options); }
+    finally { this.pendingSends--; }
+  }
+
+  async _send({ conversationId, text = '', model: modelValue, effort: effortValue, attachments = [] } = {}) {
     if (!this.connected) await this.connect();
     if (this.account?.type !== 'chatgpt') throw new Error('请先使用 ChatGPT 账户登录以使用订阅额度。');
     const existing = conversationId ? this._own(conversationId) : null;
@@ -254,6 +261,9 @@ class ChatService extends EventEmitter {
           this.client.close();
           throw new Error('Codex 未确认环境隔离，已停止连接。');
         }
+        // Deletion or disconnection can finish this operation while thread/start
+        // is pending. Never restore ownership or start a turn for that operation.
+        if (this.active.get(conversation.id) !== active) return { conversationId: conversation.id };
         threadId = result.thread.id;
         this.remoteThreads.set(conversation.id, threadId);
         this.threadOwners.set(threadId, conversation.id);
@@ -285,6 +295,12 @@ class ChatService extends EventEmitter {
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         clientUserMessageId: userMessage.id,
       });
+      if (active.deleted && result?.turn?.id) {
+        // A deleted turn may not have had an ID when stop() was called.
+        try { await this.client.request('turn/interrupt', { threadId, turnId: result.turn.id }); }
+        catch { this.client.close(); }
+        return { conversationId: conversation.id };
+      }
       if (this.active.get(conversation.id) === active) {
         active.turnId = result?.turn?.id || active.turnId;
         if (!active.turnId) throw new Error('Codex 未返回回复标识，请重新连接。');
@@ -411,13 +427,39 @@ class ChatService extends EventEmitter {
   async deleteConversation(id) {
     const conversation = this._own(id);
     if (this.active.has(id)) await this.stop(id);
+    const conversations = new Map(this.conversations);
+    const savedAttachments = new Map(this.savedAttachments);
+    conversations.delete(id);
+    for (const message of conversation.messages) savedAttachments.delete(message.id);
+    // Commit the on-disk snapshot before removing any history from memory so a
+    // failed write leaves the conversation available for a retry.
+    this._save(conversations, savedAttachments);
+    this.conversations = conversations;
+    this.savedAttachments = savedAttachments;
+    const active = this.active.get(id);
+    if (active) {
+      active.cancelled = true;
+      active.deleted = true;
+      clearTimeout(active.timer);
+      this.active.delete(id);
+    }
     const threadId = this.remoteThreads.get(id);
     this.remoteThreads.delete(id);
     if (threadId) this.threadOwners.delete(threadId);
-    for (const message of conversation.messages) this.savedAttachments.delete(message.id);
-    this.conversations.delete(id);
-    this._save();
     return { deleted: true };
+  }
+
+  async clearConversations() {
+    if (this.active.size || this.pendingSends) throw new Error('请先停止生成或等待发送完成，再清除历史记录。');
+    const count = this.conversations.size;
+    const conversations = new Map();
+    const savedAttachments = new Map();
+    this._save(conversations, savedAttachments);
+    this.conversations = conversations;
+    this.savedAttachments = savedAttachments;
+    this.remoteThreads.clear();
+    this.threadOwners.clear();
+    return { deleted: true, count };
   }
 
   close() { this.client.close(); }

@@ -1,8 +1,20 @@
 {
   "name": "minigpt-desktop",
   "version": "0.1.0",
+  "productName": "miniGPT",
   "private": true,
-  "description": "A compact Windows conversation companion with a global shortcut.",
+  "description": "A Windows ChatGPT companion powered by Codex, with a global shortcut, image chat, local history, and a floating window.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jinrt0517/miniGPT.git"
+  },
+  "homepage": "https://github.com/Jinrt0517/miniGPT#readme",
+  "bugs": {
+    "url": "https://github.com/Jinrt0517/miniGPT/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",
@@ -11,7 +23,12 @@
     "test:clipboard": "node scripts/check-clipboard.cjs",
     "test:chat": "node scripts/check-chat.cjs",
     "test:generation-controls": "node scripts/check-generation-controls.cjs",
+    "test:selection-controls": "node scripts/check-selection-controls.cjs",
+    "test:window-state": "node scripts/check-window-state.cjs",
+    "test:taskbar": "node scripts/check-taskbar.cjs",
+    "test:history": "node scripts/check-history-controls.cjs",
     "build:assets": "node scripts/build-assets.cjs",
+    "build:native": "node scripts/build-native.cjs",
     "pack": "node scripts/package.cjs"
   },
   "devDependencies": {

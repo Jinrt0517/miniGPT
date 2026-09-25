@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="styles.css" />
     <script src="vendor/marked.umd.js" defer></script>
     <script src="vendor/purify.min.js" defer></script>
+    <script src="selection-control.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -16,6 +17,8 @@
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 7v5h5M4.5 11a8 8 0 1 1 1.8 6.2M12 8v4l2.8 1.8"/></symbol>
       <symbol id="i-pin" viewBox="0 0 24 24"><path d="m15 3 6 6-3 1-3 5-1 1-6-6 1-1 5-3 1-3ZM5 19l6-6"/></symbol>
+      <symbol id="i-pin-filled" viewBox="0 0 24 24"><path d="m15 3 6 6-3 1-3 5-1 1-6-6 1-1 5-3 1-3Z" fill="currentColor"/><path d="m5 19 6-6"/></symbol>
+      <symbol id="i-reasoning" viewBox="0 0 24 24"><path d="M5 17v-4m7 4V7m7 10V3"/></symbol>
       <symbol id="i-settings" viewBox="0 0 24 24"><path d="M10 3h4l.7 2.6 2.2 1.3 2.6-.7 2 3.5-1.9 1.9v2.5l1.9 1.9-2 3.5-2.6-.7-2.2 1.3L14 23h-4l-.7-2.9-2.2-1.3-2.6.7-2-3.5 1.9-1.9v-2.5L2.5 9.7l2-3.5 2.6.7 2.2-1.3L10 3Z" transform="translate(0 -1) scale(1 .95)"/><circle cx="12" cy="11.7" r="3"/></symbol>
       <symbol id="i-hide" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
       <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
@@ -40,7 +43,7 @@
       <header class="titlebar">
         <div class="brand"><span class="brand-mark"><svg class="icon"><use href="#i-spark"/></svg></span><span>mini<span class="brand-light">GPT</span></span></div>
         <nav class="window-actions" aria-label="窗口操作">
-          <button id="new-chat" class="icon-button" title="新对话 · Ctrl+N" aria-label="新对话"><svg class="icon"><use href="#i-plus"/></svg></button>
+          <button id="new-chat" class="icon-button" title="新对话 · Ctrl+N" aria-label="新对话" hidden><svg class="icon"><use href="#i-plus"/></svg></button>
           <button id="history-toggle" class="icon-button" title="历史对话" aria-label="历史对话" aria-expanded="false"><svg class="icon"><use href="#i-history"/></svg></button>
           <button id="pin-toggle" class="icon-button" title="置顶窗口" aria-label="置顶窗口" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button>
           <span class="action-divider"></span>
@@ -55,7 +58,8 @@
 
       <section id="conversation-area" class="conversation-area" aria-label="对话">
         <div id="welcome" class="welcome">
-          <h1>有什么可以帮你？</h1>
+          <h1 id="welcome-quote"></h1>
+          <a id="welcome-source" class="welcome-source" href="#" title="查看原文"></a>
         </div>
         <div id="messages" class="messages" aria-live="polite" aria-relevant="additions text"></div>
         <button id="scroll-bottom" class="scroll-bottom icon-button" title="回到最新消息" aria-label="回到最新消息" hidden><svg class="icon"><use href="#i-arrow"/></svg></button>
@@ -68,13 +72,10 @@
           <div id="attachments" class="attachments" aria-label="待发送的附件" hidden></div>
           <textarea id="prompt" placeholder="问点什么，或分享你的想法…" rows="2" aria-label="输入消息" spellcheck="false"></textarea>
           <div class="composer-toolbar">
-            <div class="attachment-actions">
-              <button id="attach-clipboard" class="icon-button" title="粘贴图片 · Ctrl+V" aria-label="粘贴剪贴板图片"><svg class="icon"><use href="#i-paste"/></svg></button>
-            </div>
             <div class="model-controls">
-              <label class="select-wrap model-select-wrap"><span class="sr-only">模型</span><select id="model-select" aria-label="模型" disabled><option value="">连接后选择模型</option></select><svg class="icon"><use href="#i-chevron"/></svg></label>
+              <div class="selection-control model-select-wrap"><select id="model-select" aria-label="模型" aria-hidden="true" tabindex="-1" hidden disabled><option value="">连接后选择模型</option></select></div>
               <span class="model-divider"></span>
-              <label class="select-wrap effort-select-wrap"><span class="sr-only">思考强度</span><select id="effort-select" aria-label="思考强度" disabled><option value="">思考强度</option></select><svg class="icon"><use href="#i-chevron"/></svg></label>
+              <div class="selection-control effort-select-wrap"><select id="effort-select" aria-label="思考强度" aria-hidden="true" tabindex="-1" hidden disabled><option value="">思考强度</option></select></div>
             </div>
             <button id="send-message" class="send-button" title="发送 · Enter" aria-label="发送消息" disabled><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
           </div>
@@ -89,7 +90,9 @@
       <aside id="history-panel" class="side-panel history-panel" aria-label="历史对话" hidden>
         <div class="panel-heading"><h2>历史对话</h2><button class="icon-button panel-close" aria-label="关闭历史对话"><svg class="icon"><use href="#i-close"/></svg></button></div>
         <label class="history-search"><svg class="icon"><use href="#i-search"/></svg><input id="history-search" placeholder="搜索对话" aria-label="搜索对话" /></label>
+        <p id="history-error" class="history-error" role="alert" hidden></p>
         <div id="history-list" class="history-list"></div>
+        <div class="history-actions"><button id="history-clear" class="secondary-button danger-button" disabled><svg class="icon"><use href="#i-trash"/></svg>清空历史记录</button></div>
         <p class="panel-footnote">可在这里继续之前的对话</p>
       </aside>
       <aside id="settings-panel" class="side-panel settings-panel" aria-label="设置" hidden>
@@ -99,9 +102,15 @@
           <section class="settings-section"><h3>唤起与窗口</h3><label class="setting-row setting-column" for="setting-hotkey"><span><strong>全局快捷键</strong><small>在任何应用里唤起 miniGPT</small></span><div class="hotkey-field"><input id="setting-hotkey" value="Alt+Space" aria-label="全局快捷键" /><button id="save-hotkey" class="secondary-button">保存</button></div></label><p id="hotkey-status" class="help-copy"></p><label class="setting-row"><span><strong>窗口始终置顶</strong><small>让对话留在其他窗口上方</small></span><input id="setting-pin" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>失去焦点时隐藏</strong><small>点击窗口外，收起 miniGPT</small></span><input id="setting-hide-blur" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>跟随鼠标所在屏幕</strong><small>在当前使用的显示器上唤起</small></span><input id="setting-follow-mouse" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>开机启动</strong><small>登录 Windows 后在托盘待命</small></span><input id="setting-autostart" class="switch" type="checkbox" /></label></section>
           <section class="settings-section"><h3>外观</h3><label class="setting-row" for="setting-theme"><span><strong>主题</strong></span><select id="setting-theme" class="setting-select"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></section>
           <section class="settings-section"><h3>连接设置</h3><label class="setting-row setting-column" for="setting-codex-path"><span><strong>Codex 程序位置</strong><small>留空时自动寻找本机安装的 Codex</small></span><input id="setting-codex-path" class="text-field" placeholder="自动检测" spellcheck="false" /></label><button id="save-codex-path" class="secondary-button">保存并重新连接</button></section>
-          <div class="settings-bottom"><span>miniGPT <span class="version-label">0.1</span></span><button id="quit-app" class="text-button">退出应用</button></div>
+          <div class="settings-bottom"><span>miniGPT <span class="version-label"></span></span><button id="quit-app" class="text-button">退出应用</button></div>
         </div>
       </aside>
+      <dialog id="history-clear-dialog" class="history-clear-dialog" aria-labelledby="history-clear-title" aria-describedby="history-clear-description">
+        <h2 id="history-clear-title">清空历史记录？</h2>
+        <p id="history-clear-description"></p>
+        <p id="history-clear-error" class="history-clear-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="history-clear-cancel" class="secondary-button" autofocus>取消</button><button id="history-clear-confirm" class="primary-button danger-button">确认清空</button></div>
+      </dialog>
       <div id="toast" class="toast" role="status" hidden></div>
     </main>
   </body>

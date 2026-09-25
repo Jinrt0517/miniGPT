@@ -5,6 +5,7 @@ dist/
 .local-data/
 .pnpm-store/
 src/renderer/vendor/
+assets/windows-taskbar.exe
 *.log
 .env
 .env.*
