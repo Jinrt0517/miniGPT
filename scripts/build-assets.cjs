@@ -6,6 +6,14 @@ const vendor = path.join(root, 'src', 'renderer', 'vendor');
 fs.mkdirSync(vendor, { recursive: true });
 fs.copyFileSync(path.join(path.dirname(require.resolve('marked/package.json')), 'lib', 'marked.umd.js'), path.join(vendor, 'marked.umd.js'));
 fs.copyFileSync(path.join(path.dirname(require.resolve('dompurify')), 'purify.min.js'), path.join(vendor, 'purify.min.js'));
+fs.copyFileSync(require.resolve('marked-cjk-friendly'), path.join(vendor, 'marked-cjk-friendly.js'));
+fs.copyFileSync(path.join(path.dirname(require.resolve('marked-cjk-friendly/package.json')), 'LICENSE'), path.join(vendor, 'marked-cjk-friendly.LICENSE'));
+const katexDist = path.dirname(require.resolve('katex'));
+const katexVendor = path.join(vendor, 'katex');
+fs.mkdirSync(katexVendor, { recursive: true });
+for (const name of ['katex.min.js', 'katex.min.css']) fs.copyFileSync(path.join(katexDist, name), path.join(katexVendor, name));
+fs.cpSync(path.join(katexDist, 'fonts'), path.join(katexVendor, 'fonts'), { recursive: true });
+fs.copyFileSync(path.join(katexDist, '..', 'LICENSE'), path.join(katexVendor, 'LICENSE'));
 const size = 256, stride = size * 4 + 1, raw = Buffer.alloc(stride * size);
 for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
   const i = y * stride + 1 + x * 4;

@@ -9,6 +9,7 @@ const { ChatService } = require('../src/chat-service.cjs');
 const { SAFE_CONFIG } = require('../src/codex-client.cjs');
 
 const MODEL = { id: 'model-id', model: 'test-model', displayName: 'Test model', description: '', isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'normal' }, { reasoningEffort: 'high', description: 'deep' }], inputModalities: ['text', 'image'] };
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=';
 class MockClient extends EventEmitter {
   constructor() { super(); this.calls = []; this.seq = 0; this.accountType = 'chatgpt'; }
   async connect() { this.ready = true; }
@@ -19,6 +20,7 @@ class MockClient extends EventEmitter {
     if (method === 'account/read') return { account: { type: this.accountType, email: 'test@example.test', planType: 'pro', accessToken: 'never-expose' } };
     if (method === 'model/list') return { data: [MODEL], nextCursor: null };
     if (method === 'account/rateLimits/read') return { rateLimits: null };
+    if (method === 'skills/list') return { data: [{ skills: [{ name: 'imagegen', enabled: true, path: path.join(process.cwd(), 'skills', 'imagegen', 'SKILL.md') }] }] };
     if (method === 'thread/start') return { thread: { id: `remote-${++this.seq}`, ephemeral: true, environments: [] }, sandbox: { type: 'readOnly', networkAccess: false } };
     if (method === 'turn/start') return { turn: { id: `turn-${++this.seq}`, status: 'inProgress' } };
     if (method === 'turn/interrupt') return {};
@@ -357,4 +359,70 @@ test('disconnect and idle timeout terminate partial replies and allow reconnecti
   await service.send({ conversationId, text: 'retry' });
   client.close();
   assert.equal(service.getConversation(conversationId).messages.at(-1).status, 'interrupted');
+});
+
+test('generated images stream separately, deduplicate, persist and replay as assistant images', async (t) => {
+  const { service, client, dataDir, events } = setup(t);
+  const { conversationId } = await service.send({ text: '$imagegen 画一只猫' });
+  const start = client.calls.find(call => call.method === 'thread/start').params;
+  const turn = client.calls.find(call => call.method === 'turn/start').params;
+  assert.equal(start.baseInstructions, undefined, 'Preserve the native tool instructions');
+  assert.equal(start.selectedCapabilityRoots, undefined);
+  assert.equal(turn.input.find(input => input.type === 'skill').name, 'imagegen');
+  const active = service.active.get(conversationId);
+  const params = { threadId: active.threadId, turnId: active.turnId };
+  const item = { type: 'imageGeneration', id: 'image-1', status: 'completed', result: PNG, savedPath: 'C:/not-read.png' };
+  client.emit('notification', 'item/started', { ...params, item: { ...item, status: 'in_progress', result: '' } });
+  assert.equal(service.getConversation(conversationId).messages[1].imageGenerating, true);
+  client.emit('notification', 'item/completed', { ...params, item });
+  client.emit('notification', 'item/completed', { ...params, item });
+  client.emit('notification', 'turn/completed', { threadId: active.threadId, turn: { id: active.turnId, status: 'completed', items: [item] } });
+  const message = service.getConversation(conversationId).messages[1];
+  assert.equal(message.images.length, 1);
+  assert.equal(message.imageGenerating, undefined);
+  assert.equal(message.images[0].dataUrl, `data:image/png;base64,${PNG}`);
+  assert.ok(events.some(event => event.type === 'message' && event.message.images?.length === 1));
+  assert.deepEqual(service.getGeneratedImage(conversationId, message.id, item.id), message.images[0]);
+  assert.throws(() => service.getGeneratedImage(conversationId, message.id, 'unknown'), /找不到/);
+  const nextClient = new MockClient();
+  const restored = new ChatService({ dataDir, clientFactory: () => nextClient });
+  t.after(() => restored.close());
+  assert.deepEqual(restored.getConversation(conversationId).messages[1].images, message.images);
+  await restored.send({ conversationId, text: '把猫改成蓝色' });
+  const replay = nextClient.calls.find(call => call.method === 'turn/start').params.input;
+  assert.ok(replay.some(input => input.type === 'image' && input.url === message.images[0].dataUrl));
+  assert.ok(replay.some(input => /此前 助手 消息/.test(input.text || '')));
+  await restored.stop(conversationId);
+  await restored.deleteConversation(conversationId);
+  assert.doesNotMatch(fs.readFileSync(path.join(dataDir, 'conversations.json'), 'utf8'), /iVBOR/);
+});
+
+test('image failures explain their cause, and interrupted turns ignore late image results', async (t) => {
+  const { service, client } = setup(t);
+  const { conversationId } = await service.send({ text: '画图' });
+  const active = service.active.get(conversationId);
+  const params = { threadId: active.threadId, turnId: active.turnId };
+  client.emit('notification', 'item/completed', { ...params, item: { type: 'imageGeneration', id: 'failed', status: 'failed', result: '', failure: { type: 'usageLimitExceeded', limitId: 'image' } } });
+  assert.match(service.getConversation(conversationId).messages[1].imageError, /图片生成额度/);
+  await service.stop(conversationId);
+  client.emit('notification', 'item/completed', { ...params, item: { type: 'imageGeneration', id: 'late', status: 'completed', result: PNG } });
+  assert.equal(service.getConversation(conversationId).messages[1].images, undefined);
+});
+
+test('generated images reject URLs, paths and SVG bytes from events and persisted history', async (t) => {
+  const { service, client, dataDir } = setup(t);
+  const { conversationId } = await service.send({ text: '画图' });
+  const active = service.active.get(conversationId);
+  for (const result of ['https://example.invalid/tracker.png', 'C:/private.png', Buffer.from('<svg onload="alert(1)"/>').toString('base64')]) {
+    client.emit('notification', 'item/completed', { threadId: active.threadId, turnId: active.turnId, item: { type: 'imageGeneration', id: result, status: 'completed', result } });
+  }
+  assert.equal(service.getConversation(conversationId).messages[1].images, undefined);
+  finish(client, service, conversationId);
+  const file = path.join(dataDir, 'conversations.json');
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  stored.conversations[0].messages[1].images = [{ id: 'remote', dataUrl: 'https://example.invalid/tracker.png' }];
+  fs.writeFileSync(file, JSON.stringify(stored));
+  const restored = new ChatService({ dataDir, clientFactory: () => new MockClient() });
+  t.after(() => restored.close());
+  assert.deepEqual(restored.getConversation(conversationId).messages[1].images, []);
 });

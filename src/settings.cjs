@@ -1,8 +1,15 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const RESUME_HOTKEY = 'Ctrl+Alt+Space';
 
 const DEFAULTS = Object.freeze({ hotkey: 'Alt+Space', hideOnBlur: false, alwaysOnTop: false,
   launchAtLogin: false, theme: 'system', followCursor: true, codexPath: '', model: '', effort: '' });
+
+function isResumeHotkey(value) {
+  if (typeof value !== 'string') return false;
+  const keys = new Set(value.toLowerCase().split('+').map(key => ['control', 'commandorcontrol'].includes(key) ? 'ctrl' : key));
+  return keys.size === 3 && ['ctrl', 'alt', 'space'].every(key => keys.has(key));
+}
 
 function validateSettings(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('设置格式不正确');
@@ -18,6 +25,9 @@ function validateSettings(patch) {
     if (key === 'hotkey' && (!/^(?:(?:Alt|Control|Ctrl|Shift|Super|CommandOrControl)\+)+(?:Space|[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4]))$/i.test(value) || value.length > 80)) {
       throw new Error('快捷键示例：Alt+Space 或 Control+Shift+Space');
     }
+    if (key === 'hotkey' && isResumeHotkey(value)) {
+      throw new Error(`${RESUME_HOTKEY} 已用于隐藏／唤醒并继续当前对话，请选择其他全局快捷键`);
+    }
     if (key === 'codexPath' && value && (!path.isAbsolute(value) || !value.toLowerCase().endsWith('.exe'))) {
       throw new Error('请选择 Codex 可执行文件的完整 .exe 路径');
     }
@@ -30,7 +40,12 @@ class SettingsStore {
   constructor(dir) {
     this.file = path.join(dir, 'settings.json');
     this.value = { ...DEFAULTS };
-    try { this.value = { ...this.value, ...validateSettings(JSON.parse(fs.readFileSync(this.file, 'utf8'))) }; } catch {}
+    try {
+      const saved = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      // Older versions allowed this key for ordinary summons; keep other settings.
+      if (isResumeHotkey(saved?.hotkey)) saved.hotkey = DEFAULTS.hotkey;
+      this.value = { ...this.value, ...validateSettings(saved) };
+    } catch {}
   }
   save(patch) {
     const value = { ...this.value, ...validateSettings(patch) };
@@ -41,4 +56,4 @@ class SettingsStore {
     return { ...value };
   }
 }
-module.exports = { DEFAULTS, validateSettings, SettingsStore };
+module.exports = { DEFAULTS, RESUME_HOTKEY, validateSettings, SettingsStore };

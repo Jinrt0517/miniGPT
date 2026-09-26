@@ -1,4 +1,7 @@
 /* miniGPT renderer. Privileged work is available only through the preload bridge. */
+import './selection-control.js';
+import './markdown.js';
+
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
@@ -8,7 +11,7 @@
     connecting: false, panel: null, expanded: true, composing: false,
     model: '', effort: '', autoScroll: true, toastTimer: null, generation: 0, pendingGeneration: null,
     detachedConversations: new Set(), stopRequested: false,
-    historyMutation: false, historyRevision: 0, deletedConversations: new Set(), welcomeQuote: null, welcomeRequest: 0, welcomeLoading: false,
+    historyMutation: false, historyRevision: 0, deletedConversations: new Set(), welcomeQuote: null, welcomeRequest: 0, welcomePreview: null,
   };
   const api = window.mini;
   const effortNames = { none: '不思考', minimal: '极低', low: '低', medium: '中等', high: '高', xhigh: '超高', max: '最高', ultra: '极致' };
@@ -23,24 +26,48 @@
   });
   async function showNextWelcomeQuote() {
     const request = ++state.welcomeRequest;
-    state.welcomeQuote = null;
-    state.welcomeLoading = true;
-    $('welcome-quote').textContent = '正在寻找一句话…';
-    $('welcome-source').hidden = true;
     try {
       const quote = await invoke('quotes:next');
-      if (request !== state.welcomeRequest) return;
-      state.welcomeLoading = false;
-      state.welcomeQuote = quote;
-      $('welcome-quote').textContent = quote.text;
-      $('welcome-source').textContent = `— ${quote.source}`;
-      $('welcome-source').href = quote.url || '#';
-      $('welcome-source').hidden = !quote.url;
+      if (request !== state.welcomeRequest) return false;
+      renderWelcomeQuote(quote);
+      return true;
     } catch {
-      if (request !== state.welcomeRequest) return;
-      state.welcomeLoading = false;
-      $('welcome-quote').textContent = '暂时无法取得在线语录。连接网络后，新聊天会继续更新。';
+      // Quotation failures leave the existing welcome content usable.
+      return request === state.welcomeRequest;
     }
+  }
+
+  function renderWelcomeQuote(quote) {
+    state.welcomeQuote = quote?.url ? quote : null;
+    $('welcome-quote').textContent = state.welcomeQuote?.text || '今天想聊些什么？';
+    $('welcome-source').textContent = state.welcomeQuote ? `— ${quote.source}` : '';
+    $('welcome-source').href = state.welcomeQuote?.url || '#';
+    $('welcome-source').hidden = !state.welcomeQuote;
+  }
+
+  async function prepareWindow(event) {
+    await bootstrapReady;
+    ++state.welcomeRequest;
+    if (event.preview) {
+      // Prepare pixels while hidden, leaving the actual conversation, draft,
+      // attachments and any running generation available for the resume key.
+      state.welcomePreview ||= { quote: state.welcomeQuote, draft: $('prompt').value };
+      renderWelcomeQuote(event.quote);
+      $('prompt').value = '';
+      renderConversation(); renderAttachments(); resizePrompt(); closePanel(); clearError();
+    } else if (event.type === 'new-conversation') safely(() => newConversation(event.quote));
+    else {
+      if (state.welcomePreview) {
+        const preview = state.welcomePreview;
+        state.welcomePreview = null;
+        renderWelcomeQuote(preview.quote);
+        $('prompt').value = preview.draft;
+        renderConversation(); renderAttachments(); resizePrompt();
+      }
+      if (event.quote !== undefined) renderWelcomeQuote(event.quote);
+    }
+    if (event.paint) await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    await invoke('window:prepared', { presentationId: event.presentationId, background: Boolean(event.paint) });
   }
 
   function icon(name) {
@@ -84,7 +111,7 @@
     prompt.style.height = 'auto';
     prompt.style.height = `${Math.min(prompt.scrollHeight, state.expanded ? 130 : 66)}px`;
   }
-  function isGenerating() { return state.streaming || (state.sending && state.pendingGeneration === state.generation); }
+  function isGenerating() { return !state.welcomePreview && (state.streaming || (state.sending && state.pendingGeneration === state.generation)); }
   function updateSend() {
     const stop = isGenerating();
     $('send-message').disabled = stop ? state.stopRequested : (state.historyMutation || state.sending || !isConnected() || (!$('prompt').value.trim() && !state.attachments.length));
@@ -92,8 +119,8 @@
     $('send-message').setAttribute('aria-label', stop ? '停止生成' : '发送消息');
     // Switch the SVG reference itself; SVG elements do not reflect .hidden.
     $('send-message').querySelector('use').setAttribute('href', stop ? '#i-pause' : '#i-arrow');
-    $('model-select').disabled = !isConnected() || state.streaming || state.sending;
-    $('effort-select').disabled = !isConnected() || state.streaming || state.sending || !(currentModel()?.supportedReasoningEfforts?.length);
+    $('model-select').disabled = !isConnected() || (!state.welcomePreview && state.streaming) || state.sending;
+    $('effort-select').disabled = !isConnected() || (!state.welcomePreview && state.streaming) || state.sending || !(currentModel()?.supportedReasoningEfforts?.length);
     modelPicker.sync(); effortPicker.sync();
     $('login-button').disabled = state.connecting || state.streaming || state.sending;
     $('reconnect-button').disabled = state.connecting || state.streaming || state.sending;
@@ -221,6 +248,11 @@
       const failed = hotkeyStatus === false || hotkeyStatus?.registered === false || hotkeyStatus?.success === false;
       $('hotkey-status').textContent = failed ? '快捷键未注册成功，可能已被其他应用占用。请更换快捷键。' : `${state.settings.hotkey || 'Alt+Space'} 唤起或隐藏窗口`;
       $('hotkey-status').classList.toggle('hotkey-error', failed);
+      const resumeFailed = hotkeyStatus?.resumeShortcut?.registered === false;
+      $('resume-hotkey-status').textContent = resumeFailed
+        ? 'Ctrl+Alt+Space 未注册成功，可能已被其他应用占用。请在其他应用中释放这个快捷键。'
+        : `Ctrl+Alt+Space 隐藏／唤醒并继续当前对话；用它隐藏后，也可按 ${state.settings.hotkey || 'Alt+Space'} 继续。`;
+      $('resume-hotkey-status').classList.toggle('hotkey-error', resumeFailed);
     }
     applyTheme();
   }
@@ -260,16 +292,6 @@
     $('settings-toggle').setAttribute('aria-expanded', 'false');
     $('prompt').focus();
   }
-  function safeMarkdown(text) {
-    if (window.marked && window.DOMPurify) {
-      return window.DOMPurify.sanitize(window.marked.parse(text || '', { breaks: true, gfm: true }), { FORBID_TAGS: ['style', 'iframe', 'form', 'input', 'button', 'video', 'audio'], FORBID_ATTR: ['style'], ALLOW_DATA_ATTR: false });
-    }
-    return null;
-  }
-  function fillContent(element, text, markdown) {
-    const html = markdown ? safeMarkdown(text) : null;
-    if (html !== null) element.innerHTML = html; else element.textContent = text || '';
-  }
   function newMessageNode(message) {
     const wrapper = document.createElement('article');
     wrapper.className = `message message-${message.role === 'user' ? 'user' : 'assistant'}`;
@@ -287,6 +309,8 @@
       wrapper.append(attachments);
     }
     const content = document.createElement('div'); content.className = 'message-content'; wrapper.append(content);
+    const images = document.createElement('div'); images.className = 'generated-images'; wrapper.append(images);
+    const imageStatus = document.createElement('p'); imageStatus.className = 'image-status'; imageStatus.setAttribute('role', 'status'); imageStatus.hidden = true; wrapper.append(imageStatus);
     if (message.role !== 'user') {
       const actions = document.createElement('div'); actions.className = 'message-actions';
       actions.append(button('复制回答', 'icon-button', () => safely(async () => {
@@ -302,9 +326,30 @@
     let node = messageNodes.get(message.id);
     if (!node) { node = newMessageNode(message); $('messages').append(node); }
     node.classList.toggle('streaming', isStreaming);
-    node.classList.toggle('has-content', Boolean(message.content));
+    node.classList.toggle('has-content', Boolean(message.content || message.images?.length));
+    const images = node.querySelector('.generated-images');
+    const currentImages = message.images || [];
+    for (const child of [...images.children]) if (!currentImages.some(image => image.id === child.dataset.imageId)) child.remove();
+    for (const image of currentImages) {
+      if (typeof image.dataUrl !== 'string' || !/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(image.dataUrl)) continue;
+      if ([...images.children].some(child => child.dataset.imageId === image.id)) continue;
+      const figure = document.createElement('figure'); figure.className = 'generated-image'; figure.dataset.imageId = image.id;
+      const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = '生成的图片';
+      preview.addEventListener('load', () => { if (state.autoScroll) scrollToBottom(); });
+      figure.append(preview);
+      const save = button('保存图片', 'secondary-button', () => safely(async () => {
+        const result = await invoke('images:save', { conversationId: state.conversation.id, messageId: message.id, imageId: image.id });
+        if (result.saved) toast('图片已保存');
+      }));
+      figure.append(save); images.append(figure);
+    }
+    const imageStatus = node.querySelector('.image-status');
+    imageStatus.hidden = !message.imageGenerating && !message.imageError;
+    imageStatus.textContent = message.imageGenerating ? '正在生成图片…' : message.imageError || '';
     const content = node.querySelector('.message-content');
-    if (!message.content && isStreaming) {
+    if (!message.content && (message.images?.length || message.imageGenerating || message.imageError)) {
+      content.replaceChildren();
+    } else if (!message.content && isStreaming) {
       content.replaceChildren();
       const dots = document.createElement('span'); dots.className = 'thinking-dots'; dots.setAttribute('aria-label', '正在思考');
       for (let i = 0; i < 3; i++) dots.append(document.createElement('span'));
@@ -313,14 +358,14 @@
       content.textContent = '已停止生成';
     } else if (!message.content && message.status === 'failed') {
       content.textContent = message.error || '本次回答未完成，请重试。';
-    } else fillContent(content, message.content, message.role !== 'user');
+    } else window.renderMessageMarkdown(content, message.content);
     const actions = node.querySelector('.message-actions');
     if (actions) actions.hidden = isStreaming || !message.content;
   }
   function renderConversation() {
-    const messages = state.conversation?.messages || [];
+    const messages = state.welcomePreview ? [] : state.conversation?.messages || [];
+    $('app').toggleAttribute('data-welcome-preview', Boolean(state.welcomePreview));
     const welcome = !messages.length;
-    if (welcome && !state.welcomeQuote && !state.welcomeLoading) showNextWelcomeQuote();
     $('welcome').hidden = !welcome;
     $('new-chat').hidden = welcome;
     $('app').dataset.view = welcome ? 'welcome' : 'conversation';
@@ -348,8 +393,10 @@
     }
     renderConversation();
   }
-  async function newConversation() {
-    showNextWelcomeQuote();
+  async function newConversation(quote) {
+    if (quote === undefined) { if (!await showNextWelcomeQuote()) return; }
+    else { ++state.welcomeRequest; renderWelcomeQuote(quote); }
+    state.welcomePreview = null;
     const oldId = state.conversation?.id;
     const shouldStop = (state.streaming || state.sending) && oldId;
     if (oldId) state.detachedConversations.add(oldId);
@@ -479,8 +526,9 @@
     updateHistoryControls();
   }
   function renderAttachments() {
-    const container = $('attachments'); container.replaceChildren(); container.hidden = !state.attachments.length;
-    state.attachments.forEach((file) => {
+    const files = state.welcomePreview ? [] : state.attachments;
+    const container = $('attachments'); container.replaceChildren(); container.hidden = !files.length;
+    files.forEach((file) => {
       const chip = document.createElement('div'); chip.className = 'attachment-chip'; chip.append(icon(file.kind === 'image' ? 'image' : 'file'));
       const name = document.createElement('span'); name.textContent = file.name || '附件'; name.title = file.name || '附件'; chip.append(name);
       chip.append(button(`移除 ${file.name || '附件'}`, 'icon-button', () => { state.attachments = state.attachments.filter((item) => item.id !== file.id); renderAttachments(); }, 'close'));
@@ -538,6 +586,7 @@
         attachments: originalAttachments.map(({ id, name, kind }) => ({ id, name, kind })),
       });
       if (generation !== state.generation) return;
+      if (state.welcomePreview?.draft === draftText) state.welcomePreview.draft = '';
       if ($('prompt').value === draftText) $('prompt').value = '';
       const sentIds = new Set(originalAttachments.map((file) => file.id));
       state.attachments = state.attachments.filter((file) => !sentIds.has(file.id));
@@ -565,7 +614,8 @@
       if (event.type === 'connection') setConnection(event.connection);
       else if (event.type === 'settings') applySettings(event.settings, event.hotkeyStatus);
       else if (event.type === 'focus') $('prompt').focus();
-      else if (event.type === 'new-conversation') safely(newConversation);
+      else if (event.presentationId && ['new-conversation', 'prepare-window'].includes(event.type)) safely(() => prepareWindow(event));
+      else if (event.type === 'new-conversation') safely(() => newConversation(event.quote));
       else if (event.type === 'conversation' && event.conversation) {
         const conversation = event.conversation;
         upsertConversation(conversation);
@@ -580,6 +630,13 @@
           setConversation(conversation);
           if (state.stopRequested && state.streaming) safely(() => stopConversation(conversation.id));
         }
+      } else if (event.type === 'message') {
+        if (state.conversation?.id !== event.conversationId || !event.message) return;
+        const index = state.conversation.messages.findIndex(item => item.id === event.message.id);
+        if (index < 0) return;
+        state.conversation.messages[index] = event.message;
+        renderMessage(event.message, state.streaming);
+        if (state.autoScroll) scrollToBottom();
       } else if (event.type === 'delta') {
         if (!state.conversation || state.conversation.id !== event.conversationId) return;
         state.streaming = true;
@@ -666,6 +723,12 @@
     $('scroll-bottom').hidden = state.autoScroll || !(state.conversation?.messages.length);
   }, { passive: true });
   $('messages').addEventListener('click', (event) => {
+    const copy = event.target.closest('.code-copy');
+    if (copy) {
+      const code = copy.closest('.code-block')?.querySelector('pre code');
+      if (code) safely(async () => { await invoke('clipboard:write', { text: code.textContent }); toast('已复制代码'); });
+      return;
+    }
     const link = event.target.closest('a');
     if (link) { event.preventDefault(); const url = link.getAttribute('href'); if (url && /^https?:\/\//i.test(url)) safely(() => invoke('link:open', { url })); else toast('仅支持打开 http 或 https 链接。'); }
   });
@@ -716,6 +779,5 @@
       state.connecting = false; state.connection.error = errorMessage(error); renderConnection(); showError(error);
     }
   }
-  showNextWelcomeQuote();
-  bootstrap();
+  const bootstrapReady = bootstrap();
 })();

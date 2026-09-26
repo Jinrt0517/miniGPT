@@ -20,7 +20,19 @@ test('settings persist safely and invalid stored data restores defaults', () => 
     assert.equal(new SettingsStore(dir).value.theme, 'dark');
     assert.equal(new SettingsStore(dir).value.model, 'gpt-6-sol');
     assert.equal(new SettingsStore(dir).value.effort, 'xhigh');
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ hotkey: 'Alt+Control+Space', theme: 'dark', alwaysOnTop: true }));
+    const migrated = new SettingsStore(dir).value;
+    assert.equal(migrated.hotkey, 'Alt+Space');
+    assert.equal(migrated.theme, 'dark');
+    assert.equal(migrated.alwaysOnTop, true);
     fs.writeFileSync(path.join(dir, 'settings.json'), '{ invalid json');
     assert.equal(new SettingsStore(dir).value.theme, 'system');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the resume shortcut is reserved across modifier aliases and orderings', () => {
+  for (const hotkey of ['Ctrl+Alt+Space', 'Alt+Control+Space', 'ALT+COMMANDORCONTROL+SPACE']) {
+    assert.throws(() => validateSettings({ hotkey }), /已用于隐藏／唤醒并继续当前对话/);
+  }
+  assert.deepEqual(validateSettings({ hotkey: 'Ctrl+Alt+Shift+Space' }), { hotkey: 'Ctrl+Alt+Shift+Space' });
 });

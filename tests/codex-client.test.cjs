@@ -32,6 +32,10 @@ test('stdio handshake, fragmented messages, concurrent request matching and noti
   assert.equal(fixture.spawnArgs.options.shell, false);
   assert.equal(fixture.spawnArgs.options.windowsHide, true);
   assert.ok(fixture.spawnArgs.args.includes('features.shell_tool=false'));
+  assert.ok(fixture.spawnArgs.args.includes('features.image_generation=true'));
+  assert.ok(fixture.spawnArgs.args.includes('features.code_mode_host=true'));
+  assert.ok(fixture.spawnArgs.args.includes('features.apps=true'));
+  assert.ok(fixture.spawnArgs.args.includes('features.plugins=true'));
   const notification = new Promise((resolve) => client.once('notification', (...args) => resolve(args)));
   const one = client.request('one');
   const two = client.request('two');

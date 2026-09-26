@@ -3,13 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <title>miniGPT</title>
+    <link rel="stylesheet" href="vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="styles.css" />
-    <script src="vendor/marked.umd.js" defer></script>
-    <script src="vendor/purify.min.js" defer></script>
-    <script src="selection-control.js" defer></script>
-    <script src="app.js" defer></script>
+    <script src="app.js" type="module"></script>
   </head>
   <body>
     <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -48,7 +46,7 @@
           <button id="pin-toggle" class="icon-button" title="置顶窗口" aria-label="置顶窗口" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button>
           <span class="action-divider"></span>
           <button id="settings-toggle" class="icon-button" title="设置" aria-label="设置" aria-expanded="false"><svg class="icon"><use href="#i-settings"/></svg></button>
-          <button id="hide-window" class="icon-button" title="隐藏 · Esc" aria-label="隐藏窗口"><svg class="icon"><use href="#i-hide"/></svg></button>
+          <button id="hide-window" class="icon-button" title="关闭窗口 · Esc" aria-label="关闭窗口"><svg class="icon"><use href="#i-close"/></svg></button>
         </nav>
       </header>
 
@@ -58,8 +56,8 @@
 
       <section id="conversation-area" class="conversation-area" aria-label="对话">
         <div id="welcome" class="welcome">
-          <h1 id="welcome-quote"></h1>
-          <a id="welcome-source" class="welcome-source" href="#" title="查看原文"></a>
+          <h1 id="welcome-quote">今天想聊些什么？</h1>
+          <a id="welcome-source" class="welcome-source" href="#" title="查看原文" hidden></a>
         </div>
         <div id="messages" class="messages" aria-live="polite" aria-relevant="additions text"></div>
         <button id="scroll-bottom" class="scroll-bottom icon-button" title="回到最新消息" aria-label="回到最新消息" hidden><svg class="icon"><use href="#i-arrow"/></svg></button>
@@ -99,7 +97,7 @@
         <div class="panel-heading"><h2>设置</h2><button class="icon-button panel-close" aria-label="关闭设置"><svg class="icon"><use href="#i-close"/></svg></button></div>
         <div class="settings-scroll">
           <section class="settings-section account-section"><h3>账号与订阅</h3><div class="account-card"><div class="account-avatar"><svg class="icon"><use href="#i-spark"/></svg></div><div><strong id="settings-account-name">尚未连接</strong><span id="settings-account-detail">使用你的 ChatGPT 账号登录</span></div></div><div class="account-buttons"><button id="login-button" class="primary-button">登录 ChatGPT</button><button id="reconnect-button" class="secondary-button">重新连接</button></div><p class="help-copy">使用 ChatGPT 订阅中的 Codex 权益，无需 API Key。可用模型、思考强度与额度以账号实际返回为准。</p><p class="help-copy subtle">每次从隐藏状态唤起时开启新对话，也可以从历史继续聊天。对话不会同步到 ChatGPT 网页，额度与网页聊天分开计算。</p><p id="rate-limit-copy" class="help-copy" hidden></p></section>
-          <section class="settings-section"><h3>唤起与窗口</h3><label class="setting-row setting-column" for="setting-hotkey"><span><strong>全局快捷键</strong><small>在任何应用里唤起 miniGPT</small></span><div class="hotkey-field"><input id="setting-hotkey" value="Alt+Space" aria-label="全局快捷键" /><button id="save-hotkey" class="secondary-button">保存</button></div></label><p id="hotkey-status" class="help-copy"></p><label class="setting-row"><span><strong>窗口始终置顶</strong><small>让对话留在其他窗口上方</small></span><input id="setting-pin" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>失去焦点时隐藏</strong><small>点击窗口外，收起 miniGPT</small></span><input id="setting-hide-blur" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>跟随鼠标所在屏幕</strong><small>在当前使用的显示器上唤起</small></span><input id="setting-follow-mouse" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>开机启动</strong><small>登录 Windows 后在托盘待命</small></span><input id="setting-autostart" class="switch" type="checkbox" /></label></section>
+          <section class="settings-section"><h3>唤起与窗口</h3><label class="setting-row setting-column" for="setting-hotkey"><span><strong>全局快捷键</strong><small>在任何应用里唤起 miniGPT</small></span><div class="hotkey-field"><input id="setting-hotkey" value="Alt+Space" aria-label="全局快捷键" /><button id="save-hotkey" class="secondary-button">保存</button></div></label><p id="hotkey-status" class="help-copy"></p><p id="resume-hotkey-status" class="help-copy"></p><label class="setting-row"><span><strong>窗口始终置顶</strong><small>让对话留在其他窗口上方</small></span><input id="setting-pin" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>失去焦点时隐藏</strong><small>点击窗口外，收起 miniGPT</small></span><input id="setting-hide-blur" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>跟随鼠标所在屏幕</strong><small>在当前使用的显示器上唤起</small></span><input id="setting-follow-mouse" class="switch" type="checkbox" /></label><label class="setting-row"><span><strong>开机启动</strong><small>登录 Windows 后在托盘待命</small></span><input id="setting-autostart" class="switch" type="checkbox" /></label></section>
           <section class="settings-section"><h3>外观</h3><label class="setting-row" for="setting-theme"><span><strong>主题</strong></span><select id="setting-theme" class="setting-select"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></section>
           <section class="settings-section"><h3>连接设置</h3><label class="setting-row setting-column" for="setting-codex-path"><span><strong>Codex 程序位置</strong><small>留空时自动寻找本机安装的 Codex</small></span><input id="setting-codex-path" class="text-field" placeholder="自动检测" spellcheck="false" /></label><button id="save-codex-path" class="secondary-button">保存并重新连接</button></section>
           <div class="settings-bottom"><span>miniGPT <span class="version-label"></span></span><button id="quit-app" class="text-button">退出应用</button></div>

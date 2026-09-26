@@ -8,16 +8,19 @@ const { version } = require('../package.json');
 // official credential store are never opened or modified by miniGPT.
 const DISABLED_FEATURES = [
   'shell_tool', 'unified_exec', 'shell_snapshot', 'shell_snapshot_v2', 'code_mode',
-  'code_mode_host', 'code_mode_only', 'apps', 'plugins', 'remote_plugin', 'hooks',
+  'code_mode_only', 'hooks',
   'multi_agent', 'multi_agent_v2', 'browser_use', 'browser_use_external',
-  'computer_use', 'image_generation', 'view_image', 'workspace_dependencies',
-  'skill_search', 'skill_mcp_dependency_install', 'memories', 'goals',
+  'computer_use', 'view_image', 'workspace_dependencies',
+  'skill_mcp_dependency_install', 'memories', 'goals',
   'tool_suggest', 'realtime_conversation', 'in_app_local_automation',
 ];
+// ImageGen and connector tools run through the code-mode host even when the
+// conversation has no local execution environment. Disabling it strands tools.
+const ENABLED_FEATURES = ['code_mode_host', 'image_generation', 'apps', 'plugins', 'remote_plugin', 'skill_search'];
 const SAFE_CONFIG = Object.freeze({
   approval_policy: 'never', approvals_reviewer: 'user', sandbox_mode: 'read-only',
   web_search: 'disabled', mcp_servers: {},
-  features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])),
+  features: Object.fromEntries([...DISABLED_FEATURES.map((name) => [name, false]), ...ENABLED_FEATURES.map((name) => [name, true])]),
   project_doc_max_bytes: 0, project_doc_fallback_filenames: [],
 });
 
@@ -56,7 +59,7 @@ class CodexClient extends EventEmitter {
     // JSON string and boolean syntax is also valid TOML for these scalar values.
     for (const [key, value] of Object.entries(SAFE_CONFIG)) {
       if (key === 'features') {
-        for (const name of DISABLED_FEATURES) args.push('-c', `features.${name}=false`);
+        for (const [name, enabled] of Object.entries(value)) args.push('-c', `features.${name}=${enabled}`);
       } else if (key === 'mcp_servers') args.push('-c', 'mcp_servers={}');
       else args.push('-c', `${key}=${JSON.stringify(value)}`);
     }
@@ -131,9 +134,9 @@ class CodexClient extends EventEmitter {
   _receive(message) {
     if (!message || typeof message !== 'object') return;
     if (message.method && message.id !== undefined) {
-      // Fail closed. miniGPT never approves commands, file edits, permissions,
-      // dynamic tools, MCP requests, or credential-refresh requests from a server.
-      this._write({ id: message.id, error: { code: -32601, message: 'Tools and approvals are disabled in miniGPT.' } });
+      // Built-in and connected tools execute inside App Server. Requests that
+      // require a client-side executor or approval UI are not implemented here.
+      this._write({ id: message.id, error: { code: -32601, message: 'This client-side tool or approval request is not supported by miniGPT.' } });
       this.emit('blockedRequest', message.method);
       return;
     }
@@ -175,4 +178,4 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, SAFE_CONFIG, DISABLED_FEATURES, safeError };
+module.exports = { CodexClient, SAFE_CONFIG, DISABLED_FEATURES, ENABLED_FEATURES, safeError };

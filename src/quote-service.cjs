@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { version } = require('../package.json');
+const PREFETCH_COUNT = 5;
 
 // Categories are entry points, not a fixed list of quotations. Hitokoto is the
 // primary, curated Chinese quote database; Wikiquote is a second online source.
@@ -50,6 +51,11 @@ function quoteId(quote) {
   return crypto.createHash('sha256').update(quote.text.normalize('NFKC').replace(/\s+/g, '').toLowerCase()).digest('hex');
 }
 
+function isCachedQuote(quote) {
+  return typeof quote?.text === 'string' && quote.text.trim().length > 0
+    && typeof quote.source === 'string' && typeof quote.url === 'string' && /^https?:\/\//.test(quote.url);
+}
+
 class QuoteService {
   constructor(dataDir, { fetcher = fetch, random = Math.random, minIntervalMs = 550 } = {}) {
     this.file = path.join(dataDir, 'welcome-quotes.json');
@@ -57,11 +63,19 @@ class QuoteService {
     this.random = random;
     this.minIntervalMs = minIntervalMs;
     this.lastHitokotoAt = 0;
-    this.pending = Promise.resolve();
+    this.refilling = null;
+    this.fetchPending = null;
     try { this.state = JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { this.state = {}; }
     if (!this.state || typeof this.state !== 'object' || Array.isArray(this.state)) this.state = {};
     if (!Array.isArray(this.state.recent)) this.state.recent = [];
     if (!Array.isArray(this.state.cache)) this.state.cache = [];
+    this.state.cache = this.state.cache.filter(isCachedQuote).slice(0, 250);
+    const seen = new Set(this.state.recent);
+    this.state.ready = (Array.isArray(this.state.ready) ? this.state.ready : []).filter(quote => {
+      if (!isCachedQuote(quote) || seen.has(quoteId(quote))) return false;
+      seen.add(quoteId(quote));
+      return true;
+    }).slice(0, PREFETCH_COUNT);
     if (!Array.isArray(this.state.order)) this.state.order = [];
     if (!this.state.cursors || typeof this.state.cursors !== 'object') this.state.cursors = {};
   }
@@ -139,7 +153,7 @@ class QuoteService {
     const candidates = extractQuotes(content).map(text => ({
       text, source: `${category.kind} · ${page.title || title} · 维基语录`,
       url: `https://${category.wiki}.wikiquote.org/wiki/${encodeURIComponent((page.title || title).replace(/ /g, '_'))}`,
-    })).filter(item => !this.state.recent.includes(quoteId(item)));
+    })).filter(item => this.isUnseen(item));
     return candidates.length ? candidates[Math.floor(this.random() * candidates.length)] : null;
   }
 
@@ -169,23 +183,61 @@ class QuoteService {
     return { text: '暂时无法取得在线语录。连接网络后，新聊天会继续更新。', source: '离线提示', url: '' };
   }
 
-  next() {
-    const result = this.pending.then(async () => {
-      const category = this.nextCategory();
+  isUnseen(quote) {
+    const id = quoteId(quote);
+    return !this.state.recent.includes(id) && !this.state.ready.some(item => quoteId(item) === id);
+  }
+
+  async fetchFresh() {
+    const category = this.nextCategory();
+    try {
+      const quote = await this.fetchHitokoto(category);
+      if (quote && this.isUnseen(quote)) return quote;
+    } catch {}
+    // A duplicate or unavailable primary service can still yield an unseen
+    // quotation from a current Wikiquote page without hammering either API.
+    try {
+      const quote = await this.fetchQuote(category);
+      if (quote && this.isUnseen(quote)) return quote;
+    } catch {}
+    return null;
+  }
+
+  warmup() {
+    if (this.refilling) return this.refilling;
+    if (this.state.ready.length >= PREFETCH_COUNT) return Promise.resolve();
+    this.refilling = (async () => {
       try {
-        const quote = await this.fetchHitokoto(category);
-        if (quote && !this.state.recent.includes(quoteId(quote))) return this.remember(quote);
-      } catch {}
-      // A duplicate or unavailable primary service can still yield an unseen
-      // quotation from a current Wikiquote page without hammering either API.
-      try {
-        const quote = await this.fetchQuote(category);
-        if (quote) return this.remember(quote);
-      } catch {}
-      this.save();
-      return this.fallback();
-    });
-    this.pending = result.then(() => undefined, () => undefined);
+        while (this.state.ready.length < PREFETCH_COUNT) {
+          // Publish each result immediately so a cold start only waits for the
+          // first quote, never for the whole buffer or its slower replacements.
+          this.fetchPending = this.fetchFresh().then(quote => {
+            if (quote) this.state.ready.push(quote);
+            this.save();
+            return quote;
+          });
+          if (!await this.fetchPending) break;
+        }
+      } catch (error) {
+        console.warn('miniGPT could not refill welcome quotations:', error.message);
+      } finally {
+        this.refilling = null;
+        this.fetchPending = null;
+      }
+    })();
+    return this.refilling;
+  }
+
+  async next({ waitForNetwork = true } = {}) {
+    const needsInitialQuote = waitForNetwork && !this.state.ready.length && !this.state.cache.length;
+    if (needsInitialQuote) {
+      this.warmup();
+      await this.fetchPending?.catch(() => null);
+    }
+    const quote = this.state.ready.shift();
+    const result = quote ? this.remember(quote) : this.fallback();
+    // Cached quotes are returned without waiting for any network request.
+    if (quote || !needsInitialQuote) this.warmup();
     return result;
   }
 }

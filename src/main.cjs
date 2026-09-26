@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { SettingsStore, validateSettings } = require('./settings.cjs');
+const { SettingsStore, validateSettings, RESUME_HOTKEY } = require('./settings.cjs');
 const { ChatService } = require('./chat-service.cjs');
 const { QuoteService } = require('./quote-service.cjs');
 const { readClipboardImages } = require('./clipboard.cjs');
@@ -27,6 +27,12 @@ let taskbarHelper;
 let windowStateTracker, pendingMaximized = false, pendingRestoredPosition = false;
 let connection = { account: null, models: [], error: null };
 let hotkeyStatus = { registered: false, accelerator: settings.value.hotkey };
+let resumeHotkeyStatus = { registered: false, accelerator: RESUME_HOTKEY };
+let resumeConversationOnShow = false;
+let presentationId = 0, pendingPresentation = null, showingWindow = null, welcomePrepared = false;
+let rendererLoad = Promise.resolve();
+let rendererLoaded = false, preparedWelcome = null, stagedQuote;
+let spareQuote, primingQuote = null;
 const attachments = new Map();
 const pageURL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 const sendEvent = data => { if (win && !win.isDestroyed()) win.webContents.send('mini:event', data); };
@@ -46,15 +52,19 @@ function locateCodex() {
   return 'codex';
 }
 
-function installShortcut(accelerator) {
-  if (globalShortcut.isRegistered(accelerator)) return { registered: true, accelerator };
-  const old = hotkeyStatus;
+function registerShortcut(accelerator, callback) {
   let registered = false;
-  try { registered = globalShortcut.register(accelerator, toggleWindow); } catch {}
+  try { registered = globalShortcut.register(accelerator, callback); } catch {}
   if (!registered) return { registered: false, accelerator, message: `${accelerator} 已被其他程序占用。请关闭占用它的豆包、ChatGPT 或 PowerToys 快捷键，或改用其他组合。` };
-  if (old.registered && old.accelerator !== accelerator) globalShortcut.unregister(old.accelerator);
   return { registered: true, accelerator };
 }
+function installShortcut(accelerator) {
+  if (globalShortcut.isRegistered(accelerator)) return { registered: true, accelerator };
+  const candidate = registerShortcut(accelerator, toggleWindow);
+  if (candidate.registered && hotkeyStatus.registered && hotkeyStatus.accelerator !== accelerator) globalShortcut.unregister(hotkeyStatus.accelerator);
+  return candidate;
+}
+function shortcutStatus() { return { ...hotkeyStatus, resumeShortcut: resumeHotkeyStatus }; }
 
 function prepareTaskbarForShow() {
   if (!taskbarHelper || automatedTest) return;
@@ -66,29 +76,106 @@ function prepareTaskbarForShow() {
   if (result.error || result.status !== 0) console.warn('miniGPT could not preserve the fullscreen taskbar state.');
 }
 
+function primeWelcomeQuote() {
+  if (spareQuote !== undefined) return Promise.resolve(spareQuote);
+  if (primingQuote) return primingQuote;
+  primingQuote = quoteService.next({ waitForNetwork: false }).catch(() => null).then(quote => {
+    spareQuote = quote?.url ? quote : undefined;
+    return quote;
+  }).finally(() => { primingQuote = null; });
+  return primingQuote;
+}
+
+function preparePresentation(event) {
+  return new Promise(resolve => {
+    pendingPresentation = { id: event.presentationId, resolve };
+    sendEvent(event);
+  });
+}
+
+async function prepareHiddenWelcome(id) {
+  const quote = await primeWelcomeQuote();
+  await rendererLoad;
+  if (id !== presentationId || win.isDestroyed() || win.isVisible()) return;
+  spareQuote = undefined;
+  stagedQuote = quote;
+  const ready = await preparePresentation({ type: 'prepare-window', presentationId: id, quote, preview: true, paint: true });
+  if (!ready || id !== presentationId || win.isDestroyed() || win.isVisible()) return;
+  await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+  if (id === presentationId && !win.isDestroyed() && !win.isVisible()) preparedWelcome = { quote };
+}
+
+function hideWindow() {
+  presentationId++;
+  pendingPresentation?.resolve(false);
+  pendingPresentation = null;
+  showingWindow = null;
+  win?.hide();
+  preparedWelcome = null;
+  if (!resumeConversationOnShow && rendererLoaded) {
+    void prepareHiddenWelcome(presentationId).catch(error => console.warn('miniGPT could not prepare a welcome screen:', error.message));
+  }
+}
+
 function showWindow(fresh = false, followCursor = true) {
   if (!win || win.isDestroyed()) return;
-  if (win.isMinimized()) { prepareTaskbarForShow(); win.restore(); }
-  if (!win.isMaximized() && !pendingMaximized && !pendingRestoredPosition) {
-    const bounds = win.getBounds();
-    const currentDisplay = screen.getDisplayMatching(bounds);
-    const targetDisplay = followCursor && settings.value.followCursor
-      ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint()) : currentDisplay;
-    // Reopening on the same screen must not overwrite the user's placement.
-    // Following another screen carries over its relative position instead of centering.
-    setWindowBounds(win, boundsOnDisplay(bounds, currentDisplay, targetDisplay));
-  }
-  if (!automatedTest) {
-    prepareTaskbarForShow();
-    if (pendingMaximized) { win.maximize(); pendingMaximized = false; }
-    else win.show();
-    win.focus();
-  }
-  pendingRestoredPosition = false;
-  if (fresh === true) sendEvent({ type: 'new-conversation' });
-  sendEvent({ type: 'focus' });
+  if (showingWindow) return showingWindow;
+  const cachedPresentation = preparedWelcome;
+  preparedWelcome = null;
+  pendingPresentation?.resolve(false);
+  pendingPresentation = null;
+  const id = ++presentationId;
+  const reset = fresh === true && !resumeConversationOnShow;
+  resumeConversationOnShow = false;
+  const operation = (async () => {
+    if (!rendererLoaded) await rendererLoad;
+    if (id !== presentationId || win.isDestroyed()) return;
+    if (!win.isMaximized() && !pendingMaximized && !pendingRestoredPosition) {
+      const bounds = win.getBounds();
+      const currentDisplay = screen.getDisplayMatching(bounds);
+      const targetDisplay = followCursor && settings.value.followCursor
+        ? screen.getDisplayNearestPoint(screen.getCursorScreenPoint()) : currentDisplay;
+      // Set the final bounds before painting the welcome text.
+      setWindowBounds(win, boundsOnDisplay(bounds, currentDisplay, targetDisplay));
+    }
+    if (reset && cachedPresentation) {
+      // Pixels are already prepared. Commit the new conversation without
+      // putting IPC, paint acknowledgements or capturePage on the show path.
+      sendEvent({ type: 'new-conversation', quote: cachedPresentation.quote });
+    } else if (reset || !welcomePrepared || stagedQuote !== undefined) {
+      const quote = reset || !welcomePrepared ? stagedQuote ?? spareQuote ?? null : undefined;
+      if (reset || !welcomePrepared) spareQuote = undefined;
+      // Rapid reopen or an alternate resume needs only the DOM update, never
+      // a network request, animation-frame wait or screenshot.
+      const ready = await preparePresentation({ type: reset ? 'new-conversation' : 'prepare-window', presentationId: id, quote, paint: false });
+      if (!ready || id !== presentationId || win.isDestroyed()) return;
+    }
+    stagedQuote = undefined;
+    welcomePrepared = true;
+    if (win.isMinimized()) { prepareTaskbarForShow(); win.restore(); }
+    if (!automatedTest) {
+      prepareTaskbarForShow();
+      if (pendingMaximized) { win.maximize(); pendingMaximized = false; }
+      else win.show();
+      win.focus();
+    }
+    pendingRestoredPosition = false;
+    sendEvent({ type: 'focus' });
+    // Refill the spare after visibility is restored, outside the show path.
+    setImmediate(() => { if (!quitting) void primeWelcomeQuote(); });
+  })().catch(error => {
+    console.warn('miniGPT could not prepare its window:', error.message);
+  }).finally(() => { if (showingWindow === operation) showingWindow = null; });
+  showingWindow = operation;
+  return operation;
 }
-function toggleWindow() { if (win?.isVisible() && !win.isMinimized()) win.hide(); else showWindow(true); }
+function toggleWindow(preserveConversation = false) {
+  if (!win || win.isDestroyed()) return;
+  if (showingWindow || (win.isVisible() && !win.isMinimized())) {
+    resumeConversationOnShow = preserveConversation;
+    hideWindow();
+  } else return showWindow(!preserveConversation);
+}
 
 function updateTray() {
   tray?.setContextMenu(Menu.buildFromTemplate([
@@ -116,8 +203,8 @@ function updateSettings(patch) {
   // can demote our pinned window when the taskbar is behind fullscreen content.
   win?.setAlwaysOnTop(value.alwaysOnTop, process.platform === 'win32' ? 'pop-up-menu' : 'floating');
   updateTray();
-  sendEvent({ type: 'settings', settings: value, hotkeyStatus });
-  return { settings: value, hotkeyStatus };
+  sendEvent({ type: 'settings', settings: value, hotkeyStatus: shortcutStatus() });
+  return { settings: value, hotkeyStatus: shortcutStatus() };
 }
 
 async function connect() {
@@ -181,8 +268,13 @@ function safeExternal(url, auth = false) {
 }
 
 const actions = {
-  bootstrap: async () => ({ version: app.getVersion(), settings: settings.value, connection, conversations: chat ? await chat.listConversations() : [], hotkeyStatus }),
-  'quotes:next': () => quoteService.next(),
+  bootstrap: async () => ({ version: app.getVersion(), settings: settings.value, connection, conversations: chat ? await chat.listConversations() : [], hotkeyStatus: shortcutStatus() }),
+  'quotes:next': () => quoteService.next({ waitForNetwork: false }),
+  'window:prepared': ({ presentationId: id }) => {
+    if (pendingPresentation?.id !== id) return;
+    pendingPresentation.resolve(true);
+    pendingPresentation = null;
+  },
   connect,
   login: async () => { if (!chat) await connect(); const result = await chat.login(); if (result.authUrl) await safeExternal(result.authUrl, true); return result; },
   'conversations:list': () => chat.listConversations(),
@@ -201,10 +293,20 @@ const actions = {
     return result;
   },
   'chat:stop': ({ conversationId }) => chat.stop(conversationId),
+  'images:save': async ({ conversationId, messageId, imageId }) => {
+    const image = chat.getGeneratedImage(conversationId, messageId, imageId);
+    const match = /^data:image\/(png|jpeg|webp|gif);base64,(.+)$/.exec(image.dataUrl);
+    if (!match) throw new Error('图片格式不正确。');
+    const extension = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const result = await dialog.showSaveDialog(win, { title: '保存生成图片', defaultPath: `miniGPT-${Date.now()}.${extension}`, filters: [{ name: '图片', extensions: [extension] }] });
+    if (result.canceled || !result.filePath) return { saved: false };
+    await fs.promises.writeFile(result.filePath, Buffer.from(match[2], 'base64'));
+    return { saved: true };
+  },
   'attachments:pick': pickAttachments,
   'attachments:clipboard': async () => (await readClipboardImages({ clipboard, nativeImage })).map(addAttachment),
   'settings:update': updateSettings,
-  'window:hide': () => win.hide(),
+  'window:hide': hideWindow,
   'window:expand': ({ expanded }) => {
     setWindowBounds(win, { ...win.getBounds(), height: expanded ? 680 : 260 });
     showWindow(false, false);
@@ -219,6 +321,8 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => showWindow(!win?.isVisible()));
   app.whenReady().then(async () => {
+    quoteService.warmup();
+    void primeWelcomeQuote();
     if (process.platform === 'win32') {
       taskbarHelper = app.isPackaged ? path.join(__dirname, '..', 'assets', 'windows-taskbar.exe')
         : require('../scripts/build-native.cjs').buildNative();
@@ -239,15 +343,16 @@ else {
       skipTaskbar: true,
       alwaysOnTop: false, autoHideMenuBar: true,
       icon: path.join(__dirname, '..', 'assets', 'icon.png'),
-      webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false }
+      webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false,
+        backgroundThrottling: false }
     });
     win.setAlwaysOnTop(settings.value.alwaysOnTop, process.platform === 'win32' ? 'pop-up-menu' : 'floating');
     if (restoredState) setWindowBounds(win, restoredState.bounds);
     windowStateTracker = trackWindowState(win, windowStateStore, { isMaximized: () => pendingMaximized || win.isMaximized() });
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', event => event.preventDefault());
-    win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
-    win.on('blur', () => { if (settings.value.hideOnBlur && !settings.value.alwaysOnTop) win.hide(); });
+    win.on('close', event => { if (!quitting) { event.preventDefault(); hideWindow(); } });
+    win.on('blur', () => { if (settings.value.hideOnBlur && !settings.value.alwaysOnTop) hideWindow(); });
     ipcMain.handle('mini:invoke', async (event, action, payload) => {
       try {
         if (event.sender !== win.webContents || event.senderFrame?.url !== pageURL || !Object.hasOwn(actions, action)) throw new Error('不允许的请求');
@@ -256,9 +361,14 @@ else {
     });
     tray = new Tray(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png')));
     tray.setToolTip('miniGPT · 随时聊聊'); tray.on('click', () => showWindow(!win?.isVisible()));
-    hotkeyStatus = installShortcut(settings.value.hotkey); updateTray();
-    await win.loadURL(pageURL);
+    hotkeyStatus = installShortcut(settings.value.hotkey);
+    resumeHotkeyStatus = registerShortcut(RESUME_HOTKEY, () => toggleWindow(true));
+    updateTray();
+    rendererLoad = win.loadURL(pageURL);
+    await rendererLoad;
+    rendererLoaded = true;
     if (!process.argv.includes('--hidden')) showWindow();
+    else void prepareHiddenWelcome(++presentationId).catch(error => console.warn('miniGPT could not prepare a welcome screen:', error.message));
     connect();
   }).catch(error => {
     if (automatedTest) console.error('miniGPT startup failed:', error);

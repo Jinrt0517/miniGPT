@@ -1,6 +1,6 @@
 {
   "name": "minigpt-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "productName": "miniGPT",
   "private": true,
   "description": "A Windows ChatGPT companion powered by Codex, with a global shortcut, image chat, local history, and a floating window.",
@@ -17,16 +17,21 @@
   },
   "main": "src/main.cjs",
   "scripts": {
+    "prestart": "node scripts/build-assets.cjs",
     "start": "electron .",
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "node scripts/smoke-desktop.cjs",
     "test:clipboard": "node scripts/check-clipboard.cjs",
     "test:chat": "node scripts/check-chat.cjs",
     "test:generation-controls": "node scripts/check-generation-controls.cjs",
+    "test:resume-shortcut": "node scripts/check-resume-shortcut.cjs",
     "test:selection-controls": "node scripts/check-selection-controls.cjs",
+    "test:welcome-quotes": "node scripts/check-welcome-quotes.cjs",
     "test:window-state": "node scripts/check-window-state.cjs",
     "test:taskbar": "node scripts/check-taskbar.cjs",
     "test:history": "node scripts/check-history-controls.cjs",
+    "pretest:rendering": "node scripts/build-assets.cjs",
+    "test:rendering": "node scripts/check-rendering.cjs",
     "build:assets": "node scripts/build-assets.cjs",
     "build:native": "node scripts/build-native.cjs",
     "pack": "node scripts/package.cjs"
@@ -37,6 +42,8 @@
   },
   "dependencies": {
     "dompurify": "^3.2.6",
-    "marked": "^16.0.0"
+    "katex": "^0.18.9",
+    "marked": "^16.0.0",
+    "marked-cjk-friendly": "^0.1.2"
   }
 }
